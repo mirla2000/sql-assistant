@@ -1,0 +1,57 @@
+import sys
+import os
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+from dotenv import load_dotenv
+load_dotenv()
+
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from backend.models import QueryRequest, QueryResponse
+from backend.bigquery_client import BigQueryClient
+from backend.claude_client import ClaudeClient
+
+app = FastAPI(title="SQL Assistant")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+_bq_client: BigQueryClient | None = None
+_claude_client: ClaudeClient | None = None
+
+
+def _get_clients():
+    global _bq_client, _claude_client
+    if _bq_client is None:
+        _bq_client = BigQueryClient()
+        _claude_client = ClaudeClient(_bq_client.schema_string)
+    return _bq_client, _claude_client
+
+
+@app.post("/api/query", response_model=QueryResponse)
+async def query(request: QueryRequest):
+    bq, claude = _get_clients()
+    sql = claude.generate_sql(request.question)
+    try:
+        columns, rows = bq.execute_query(sql)
+        return QueryResponse(sql=sql, columns=columns, rows=rows, row_count=len(rows))
+    except Exception as first_error:
+        corrected_sql = claude.fix_sql(sql, str(first_error))
+        try:
+            columns, rows = bq.execute_query(corrected_sql)
+            return QueryResponse(sql=corrected_sql, columns=columns, rows=rows, row_count=len(rows))
+        except Exception as second_error:
+            return QueryResponse(
+                sql=corrected_sql, columns=[], rows=[], row_count=0, error=str(second_error)
+            )
+
+
+@app.get("/api/schema")
+async def get_schema():
+    bq, _ = _get_clients()
+    return {"schema": bq.schema_string}

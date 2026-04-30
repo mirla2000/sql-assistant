@@ -1,0 +1,19 @@
+# Credentials — never commit these
+.env
+*service_account*.json
+*credentials*.json
+*-f3-*.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Node
+node_modules/
+frontend/dist/
+
+# Vercel
+.vercel/
