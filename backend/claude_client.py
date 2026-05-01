@@ -62,7 +62,9 @@ hopeful-list-429812-f3.payments.all_payments_prod
   Purpose: All payment transactions. Use for revenue analysis.
   Key columns: order_id, customer_account_id, amount (IN CENTS — divide by 100),
                currency, status, payment_type ('first'/'upsell'/'recurring'),
-               subscription_id (NUMERIC ID — see mapping below), channel, date
+               subscription_id (NUMERIC ID — see mapping below), channel, date,
+               created_at (INTEGER — Unix timestamp in microseconds, use timestamp_micros(created_at) to convert)
+  Use created_at for precise transaction time. Both created_at and exchange_rate are UTC — no timezone shift needed.
   ALWAYS filter: WHERE status = 'settled'
 
   subscription_id → plan name mapping (subscription_id is numeric, NOT '1Week'/'4Week' etc.):
@@ -173,6 +175,10 @@ STANDARD RULES — ALWAYS APPLY THESE
     Step 2: join pr_funnel_email_submit ON device_id to get user_id
     Step 3: join pr_funnel_subscribe ON user_id
     Conversion denominator = COUNT(DISTINCT device_id) from step 1 (not user_id)
+    IMPORTANT: The user's answer to any quiz question is ALWAYS in JSON_VALUE(event_metadata, '$.question_answer').
+    Do NOT use $.gender, $.age, or other profile field names to read the answer — those are profile fields
+    populated from previous questions. When key_value='gender', answer is in $.question_answer.
+    When key_value='age', answer is in $.question_answer. Same for all other key_value filters.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 EXAMPLES
@@ -242,8 +248,8 @@ WITH quiz_answers AS (
   SELECT
     device_id,
     CASE
-      WHEN JSON_VALUE(event_metadata, '$.gender') IN ('Male','Homme','Uomo','Hombre','Männlich','Masculino','Male →') THEN 'male'
-      WHEN JSON_VALUE(event_metadata, '$.gender') IN ('Female','Femme','Mujer','Donna','Feminino','Weiblich','Female →') THEN 'female'
+      WHEN JSON_VALUE(event_metadata, '$.question_answer') IN ('Male','Homme','Uomo','Hombre','Männlich','Masculino','Male →') THEN 'male'
+      WHEN JSON_VALUE(event_metadata, '$.question_answer') IN ('Female','Femme','Mujer','Donna','Feminino','Weiblich','Female →') THEN 'female'
       ELSE 'unknown'
     END AS gender_normalized
   FROM `hopeful-list-429812-f3.events.funnel-raw-table`
