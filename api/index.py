@@ -1,16 +1,11 @@
-import sys
-import os
-
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-
 from dotenv import load_dotenv
 load_dotenv()
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from backend.models import QueryRequest, QueryResponse
-from backend.bigquery_client import BigQueryClient
-from backend.claude_client import ClaudeClient
+from models import QueryRequest, QueryResponse
+from bigquery_client import BigQueryClient
+from claude_client import ClaudeClient
 
 app = FastAPI(title="SQL Assistant")
 
