@@ -1,0 +1,7 @@
+{
+  "name": "sql-assistant",
+  "scripts": {
+    "build": "cd frontend && npm ci && npm run build",
+    "dev": "cd frontend && npm run dev"
+  }
+}
