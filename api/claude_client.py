@@ -9,6 +9,13 @@ Return ONLY the raw SQL query — no explanation, no markdown, no backticks.
 Add LIMIT 500 unless the user explicitly asks for all records or a specific number.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+!!! CRITICAL: ALLOWED TABLES ONLY !!!
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+You MUST ONLY query the tables listed in the DATASETS AND TABLES section below.
+Do NOT use any other table even if it appears elsewhere in the schema.
+Do NOT invent table names. If a question cannot be answered with the listed tables, say so.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 DATASETS AND TABLES
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
