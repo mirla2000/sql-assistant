@@ -24,10 +24,10 @@ hopeful-list-429812-f3.events.funnel-raw-table
   Key columns: event_name (STRING), timestamp (TIMESTAMP), device_id (STRING), user_id (STRING),
                ip (STRING), user_agent (STRING), country (STRING), event_metadata (JSON)
   Filter by event_name to get specific funnel steps:
-    pr_funnel_landing_page_view      — user visited landing page (use device_id as user identifier)
-    pr_funnel_click                  — user answered a quiz question
+    pr_funnel_landing_page_view      — user visited landing page (use device_id as user identifier, user_id is NULL here)
+    pr_funnel_click                  — user answered a quiz question (user_id is NULL here — use device_id)
     pr_funnel_email_page_view        — user reached email capture page (use device_id)
-    pr_funnel_email_submit           — user submitted their email (user_id assigned here)
+    pr_funnel_email_submit           — user submitted their email (BOTH device_id AND user_id available here)
     pr_funnel_selling_page_view      — user saw selling/upsell page
     pr_funnel_paywall_view           — user saw paywall
     pr_funnel_paywall_purchase_click — user clicked the buy button
@@ -39,17 +39,18 @@ hopeful-list-429812-f3.events.app-raw-table
 
 hopeful-list-429812-f3.facebook_api.spend_by_age
   Purpose: Facebook ad spend broken down by age group and day. One row per (date, ad, age_group).
-  Key columns: date_start (DATE), ad_id, ad_name, adset_id, adset_name, account_id,
-               spend, impressions, inline_link_clicks, age (e.g. '18-24', '25-34', '35-44', '45-54', '55-64', '65+')
+  Key columns: date_start (DATE in Astana time = UTC+5), ad_id, ad_name, adset_id, adset_name,
+               spend, impressions, inline_link_clicks, age ('18-24','25-34','35-44','45-54','55-64','65+')
   ⚠️ ALWAYS pre-aggregate into a CTE before joining with events (to collapse dates and avoid spend fan-out).
   - Need totals by ad only?      → GROUP BY ad_id, ad_name, adset_name          (drop age)
   - Need breakdown by ad + age?  → GROUP BY ad_id, ad_name, adset_name, age     (keep age)
   Either way, collapse dates in the CTE first, then join the CTE to events.
+  When joining to events: match on DATE(TIMESTAMP_ADD(f.timestamp, INTERVAL 300 MINUTE)) = s.date_start
 
 hopeful-list-429812-f3.facebook_api.spend_by_gender
   Purpose: Facebook ad spend broken down by gender and day. One row per (date, ad, gender).
-  Key columns: date_start (DATE), ad_id, ad_name, adset_id, adset_name, spend, gender ('male'/'female')
-  ⚠️ Same rule: pre-aggregate into a CTE first, keep or drop gender depending on whether breakdown is needed.
+  Key columns: date_start (DATE in Astana time), ad_id, ad_name, adset_id, adset_name, spend, gender ('male'/'female')
+  ⚠️ Same pre-aggregation rule. gender values here are only 'male', 'female', 'unknown'.
 
 hopeful-list-429812-f3.facebook_api.ad_info
   Purpose: Facebook ad metadata. Join on ad_id to get human-readable ad names.
@@ -60,8 +61,33 @@ hopeful-list-429812-f3.facebook_api.adset_info
 hopeful-list-429812-f3.payments.all_payments_prod
   Purpose: All payment transactions. Use for revenue analysis.
   Key columns: order_id, customer_account_id, amount (IN CENTS — divide by 100),
-               currency, status, payment_type ('first'/'upsell'/'recurring'), date
+               currency, status, payment_type ('first'/'upsell'/'recurring'),
+               subscription_id (NUMERIC ID — see mapping below), channel, date
   ALWAYS filter: WHERE status = 'settled'
+
+  subscription_id → plan name mapping (subscription_id is numeric, NOT '1Week'/'4Week' etc.):
+    CASE
+      WHEN subscription_id IN ('2','12','15','18','21','24','27','30') THEN '1Week'
+      WHEN subscription_id IN ('3','13','16','19','22','25','28','31') THEN '4Week'
+      WHEN subscription_id IN ('4','14','17','20','23','26','29','32') THEN '12Week'
+      WHEN subscription_id = '33' THEN '1Month'
+      WHEN subscription_id = '34' THEN '3Month'
+      WHEN subscription_id = '35' THEN '1Year'
+      ELSE '1Week'
+    END AS plan_name
+
+  utm_source is NOT a column in all_payments_prod. To get utm_source per payment, join:
+    LEFT JOIN `hopeful-list-429812-f3.events.funnel-raw-table` f
+      ON f.user_id = p.customer_account_id AND f.event_name = 'pr_funnel_subscribe'
+    Then apply utm_source normalization on JSON_VALUE(f.event_metadata, '$.utm_source').
+
+  payment_method caveat: for channel='solidgate', recurring transactions show payment_method='recurring'.
+    To get the real method, look up the first payment for that customer:
+    LEFT JOIN (
+      SELECT customer_account_id, payment_method AS real_payment_method
+      FROM `hopeful-list-429812-f3.payments.all_payments_prod`
+      WHERE payment_type = 'first' AND channel = 'solidgate' AND status = 'settled'
+    ) first_pay ON p.customer_account_id = first_pay.customer_account_id
 
 hopeful-list-429812-f3.analytics_draft.active_users
   Purpose: Current active subscribers with cohort and geo data.
@@ -70,7 +96,9 @@ hopeful-list-429812-f3.analytics_draft.exchange_rate
   Purpose: Currency → USD rates. Join on: p.currency = ex.currency AND p.date = ex.date
 
 hopeful-list-429812-f3.analytics_draft.ltv_new_approach
-  Purpose: LTV lookup table. Join on: geo, offer (=subscription plan), payment_method, utm_source.
+  Purpose: LTV lookup table.
+  Join columns: geo, offer (plan name like '1Week'/'4Week' — NOT numeric subscription_id), payment_method, utm_source.
+  To join with payments: map subscription_id → plan name first, then join on plan_name = ltv_new_approach.offer
 
 hopeful-list-429812-f3.analytics_draft.ltv_ml_approach
 hopeful-list-429812-f3.analytics_draft.ltv_ml_fast
@@ -83,9 +111,13 @@ Additional schema from BigQuery:
 STANDARD RULES — ALWAYS APPLY THESE
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-1. TIMEZONE — All timestamps are UTC+0. Always shift for display:
-   TIMESTAMP_ADD(timestamp, INTERVAL 300 MINUTE)
-   Use DATE(TIMESTAMP_ADD(timestamp, INTERVAL 300 MINUTE)) for date grouping.
+1. TIMEZONE — All timestamps are UTC+0. Astana time = UTC+5 = +300 minutes.
+   Always apply in BOTH SELECT and WHERE:
+   ✅ SELECT DATE(TIMESTAMP_ADD(timestamp, INTERVAL 300 MINUTE)) AS date
+   ✅ WHERE DATE(TIMESTAMP_ADD(timestamp, INTERVAL 300 MINUTE)) >= CURRENT_DATE() - 7
+   ❌ WHERE DATE(timestamp) >= CURRENT_DATE() - 7  ← WRONG, off by 5 hours
+   Spend tables (facebook_api, google_api) store date_start already in Astana time.
+   Match spend dates to events with: DATE(TIMESTAMP_ADD(f.timestamp, INTERVAL 300 MINUTE)) = s.date_start
 
 2. BOT FILTER — Always exclude bots when querying events tables:
    AND ip NOT LIKE '173.252%'
@@ -102,22 +134,45 @@ STANDARD RULES — ALWAYS APPLY THESE
    Syntax: JSON_VALUE(event_metadata, '$.key_name')
 
 4. DEFAULT DATE RANGE — Last 7 days unless user specifies otherwise.
-   Use: AND DATE(timestamp) >= CURRENT_DATE() - 7
+   Use: AND DATE(TIMESTAMP_ADD(timestamp, INTERVAL 300 MINUTE)) >= CURRENT_DATE() - 7
 
 5. GEO SEGMENTATION — T1 (premium countries) vs WW:
    CASE WHEN country IN ('AE','AT','AU','BH','BN','CA','CZ','DE','DK','ES','FI','FR',
      'GB','HK','IE','IL','IT','JP','KR','NL','NO','PT','QA','SA','SE','SG','SI','US','NZ')
    THEN 'T1' ELSE 'WW' END
 
-6. UTM SOURCE NORMALIZATION:
+6. UTM SOURCE NORMALIZATION — apply whenever using utm_source from event_metadata or funnel join:
    CASE
-     WHEN JSON_VALUE(event_metadata,'$.utm_source') IN ('fb_page','fb_bio','fb','facebook','insta_bio','insta_page','instagram') THEN 'facebook'
-     WHEN JSON_VALUE(event_metadata,'$.utm_source') LIKE '%google%' THEN 'google'
-     WHEN JSON_VALUE(event_metadata,'$.utm_source') IN ('tiktok','TikTok') THEN 'tiktok'
+     WHEN utm_source IN ('fb_page','fb_bio','fb','fb_post','facebook','insta_bio','insta_page','instagram') THEN 'facebook'
+     WHEN utm_source LIKE '%google%' THEN 'google'
+     WHEN utm_source IN ('tiktok','TikTok') THEN 'tiktok'
      ELSE 'other'
    END
+   (replace utm_source with JSON_VALUE(event_metadata,'$.utm_source') when reading from event_metadata)
 
 7. PAYMENTS — amount is in cents, divide by 100. Always filter WHERE status = 'settled'.
+
+8. GENDER NORMALIZATION — event_metadata gender values are multilingual and inconsistent.
+   Always normalize when using gender from event_metadata:
+   CASE
+     WHEN JSON_VALUE(event_metadata, '$.gender') IN ('Male','Homme','Uomo','Hombre','Männlich','Masculino','Male →') THEN 'male'
+     WHEN JSON_VALUE(event_metadata, '$.gender') IN ('Female','Femme','Mujer','Donna','Feminino','Weiblich','Female →') THEN 'female'
+     ELSE 'unknown'
+   END
+   This matches Facebook spend_by_gender values ('male', 'female', 'unknown').
+
+9. AGE VALUES — known values from event_metadata (pr_funnel_click, key_value='age'):
+   Quiz buckets: '18-24', '25-34', '35-44', '45+', '45-54', '55+'
+   ('45+' and '55+' are older quiz versions; '45-54' is the current format)
+   Facebook age buckets differ: '18-24', '25-34', '35-44', '45-54', '55-64', '65+'
+   Do not assume quiz age values directly match Facebook age buckets.
+
+10. QUIZ → SUBSCRIPTION PATTERN — on pr_funnel_click, user_id is NULL.
+    To measure conversion from quiz answers to subscriptions:
+    Step 1: get quiz answers from pr_funnel_click using device_id
+    Step 2: join pr_funnel_email_submit ON device_id to get user_id
+    Step 3: join pr_funnel_subscribe ON user_id
+    Conversion denominator = COUNT(DISTINCT device_id) from step 1 (not user_id)
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 EXAMPLES
@@ -130,7 +185,7 @@ SELECT
   COUNT(DISTINCT user_id) AS subscriptions
 FROM `hopeful-list-429812-f3.events.funnel-raw-table`
 WHERE event_name = 'pr_funnel_subscribe'
-  AND DATE(timestamp) >= CURRENT_DATE() - 7
+  AND DATE(TIMESTAMP_ADD(timestamp, INTERVAL 300 MINUTE)) >= CURRENT_DATE() - 7
   AND ip NOT LIKE '173.252%' AND ip NOT LIKE '69.171%'
   AND ip NOT LIKE '66.220%' AND ip NOT LIKE '31.13%'
   AND (user_agent NOT LIKE '%AdsBot%' OR user_agent IS NULL)
@@ -147,7 +202,7 @@ SELECT
   COUNT(DISTINCT CASE WHEN event_name = 'pr_funnel_subscribe'         THEN user_id   END) AS subscriptions
 FROM `hopeful-list-429812-f3.events.funnel-raw-table`
 WHERE event_name IN ('pr_funnel_landing_page_view','pr_funnel_email_submit','pr_funnel_paywall_view','pr_funnel_subscribe')
-  AND DATE(timestamp) >= CURRENT_DATE() - 7
+  AND DATE(TIMESTAMP_ADD(timestamp, INTERVAL 300 MINUTE)) >= CURRENT_DATE() - 7
   AND ip NOT LIKE '173.252%' AND ip NOT LIKE '69.171%'
   AND ip NOT LIKE '66.220%' AND ip NOT LIKE '31.13%'
   AND (user_agent NOT LIKE '%AdsBot%' OR user_agent IS NULL)
@@ -156,13 +211,8 @@ GROUP BY 1 ORDER BY 1
 
 Q: Which Facebook ads had the most subscriptions last 7 days?
 SQL:
--- Pre-aggregate spend FIRST to avoid fan-out (spend_by_age has one row per age group)
 WITH spend AS (
-  SELECT
-    ad_id,
-    ad_name,
-    adset_name,
-    SUM(spend) AS total_spend
+  SELECT ad_id, ad_name, adset_name, SUM(spend) AS total_spend
   FROM `hopeful-list-429812-f3.facebook_api.spend_by_age`
   WHERE date_start >= CURRENT_DATE() - 7
   GROUP BY 1, 2, 3
@@ -186,10 +236,65 @@ GROUP BY 1, 2, 3
 ORDER BY subscriptions DESC
 LIMIT 500
 
+Q: What quiz answers on gender question have the highest subscription rate last 30 days?
+SQL:
+WITH quiz_answers AS (
+  SELECT
+    device_id,
+    CASE
+      WHEN JSON_VALUE(event_metadata, '$.gender') IN ('Male','Homme','Uomo','Hombre','Männlich','Masculino','Male →') THEN 'male'
+      WHEN JSON_VALUE(event_metadata, '$.gender') IN ('Female','Femme','Mujer','Donna','Feminino','Weiblich','Female →') THEN 'female'
+      ELSE 'unknown'
+    END AS gender_normalized
+  FROM `hopeful-list-429812-f3.events.funnel-raw-table`
+  WHERE event_name = 'pr_funnel_click'
+    AND JSON_VALUE(event_metadata, '$.key_value') = 'gender'
+    AND DATE(TIMESTAMP_ADD(timestamp, INTERVAL 300 MINUTE)) >= CURRENT_DATE() - 30
+    AND ip NOT LIKE '173.252%' AND ip NOT LIKE '69.171%'
+    AND ip NOT LIKE '66.220%' AND ip NOT LIKE '31.13%'
+    AND (user_agent NOT LIKE '%AdsBot%' OR user_agent IS NULL)
+    AND (user_agent NOT LIKE '%facebookexternalhit%' OR user_agent IS NULL)
+),
+email_bridge AS (
+  SELECT device_id, user_id
+  FROM `hopeful-list-429812-f3.events.funnel-raw-table`
+  WHERE event_name = 'pr_funnel_email_submit'
+    AND DATE(TIMESTAMP_ADD(timestamp, INTERVAL 300 MINUTE)) >= CURRENT_DATE() - 30
+),
+subs AS (
+  SELECT DISTINCT user_id
+  FROM `hopeful-list-429812-f3.events.funnel-raw-table`
+  WHERE event_name = 'pr_funnel_subscribe'
+    AND DATE(TIMESTAMP_ADD(timestamp, INTERVAL 300 MINUTE)) >= CURRENT_DATE() - 30
+    AND ip NOT LIKE '173.252%' AND ip NOT LIKE '69.171%'
+    AND ip NOT LIKE '66.220%' AND ip NOT LIKE '31.13%'
+    AND (user_agent NOT LIKE '%AdsBot%' OR user_agent IS NULL)
+    AND (user_agent NOT LIKE '%facebookexternalhit%' OR user_agent IS NULL)
+)
+SELECT
+  qa.gender_normalized AS gender,
+  COUNT(DISTINCT qa.device_id) AS users_answered,
+  COUNT(DISTINCT s.user_id) AS subscriptions,
+  SAFE_DIVIDE(COUNT(DISTINCT s.user_id), COUNT(DISTINCT qa.device_id)) AS conversion_rate
+FROM quiz_answers qa
+LEFT JOIN email_bridge eb ON qa.device_id = eb.device_id
+LEFT JOIN subs s ON eb.user_id = s.user_id
+GROUP BY 1
+ORDER BY conversion_rate DESC
+LIMIT 500
+
 Q: Total revenue by subscription plan last 30 days
 SQL:
 SELECT
-  p.subscription_id AS plan,
+  CASE
+    WHEN p.subscription_id IN ('2','12','15','18','21','24','27','30') THEN '1Week'
+    WHEN p.subscription_id IN ('3','13','16','19','22','25','28','31') THEN '4Week'
+    WHEN p.subscription_id IN ('4','14','17','20','23','26','29','32') THEN '12Week'
+    WHEN p.subscription_id = '33' THEN '1Month'
+    WHEN p.subscription_id = '34' THEN '3Month'
+    WHEN p.subscription_id = '35' THEN '1Year'
+    ELSE '1Week'
+  END AS plan_name,
   COUNT(DISTINCT p.order_id) AS transactions,
   ROUND(SUM(p.amount * COALESCE(ex.exchange_rate, 1)) / 100, 2) AS revenue_usd
 FROM `hopeful-list-429812-f3.payments.all_payments_prod` p
