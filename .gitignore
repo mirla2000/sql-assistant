@@ -17,3 +17,5 @@ frontend/dist/
 
 # Vercel
 .vercel/
+.vercel
+
