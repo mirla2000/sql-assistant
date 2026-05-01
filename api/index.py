@@ -32,7 +32,7 @@ def _get_clients():
     return _bq_client, _claude_client
 
 
-@app.post("/api/query", response_model=QueryResponse)
+@app.post("/query", response_model=QueryResponse)
 async def query(request: QueryRequest):
     bq, claude = _get_clients()
     sql = claude.generate_sql(request.question)
@@ -50,7 +50,7 @@ async def query(request: QueryRequest):
             )
 
 
-@app.get("/api/schema")
+@app.get("/schema")
 async def get_schema():
     bq, _ = _get_clients()
     return {"schema": bq.schema_string}
