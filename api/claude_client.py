@@ -38,13 +38,16 @@ hopeful-list-429812-f3.events.app-raw-table
   Key event_names: pr_webapp_upsell_successful_purchase, pr_webapp_unsubscribed
 
 hopeful-list-429812-f3.facebook_api.spend_by_age
-  Purpose: Facebook ad spend by age group per day.
+  Purpose: Facebook ad spend by age group per day. Has one row per (date, ad, age_group).
   Key columns: date_start (DATE), ad_id, ad_name, adset_id, adset_name, account_id,
                spend, impressions, inline_link_clicks, age
+  ⚠️ WARNING: ALWAYS pre-aggregate this table in a CTE before joining with events.
+  Joining directly causes spend to be multiplied by the number of age groups (~37x fan-out).
 
 hopeful-list-429812-f3.facebook_api.spend_by_gender
-  Purpose: Facebook ad spend by gender per day.
+  Purpose: Facebook ad spend by gender per day. Has one row per (date, ad, gender).
   Key columns: date_start (DATE), ad_id, ad_name, adset_id, adset_name, spend, gender
+  ⚠️ WARNING: ALWAYS pre-aggregate this table in a CTE before joining with events.
 
 hopeful-list-429812-f3.facebook_api.ad_info
   Purpose: Facebook ad metadata. Join on ad_id to get human-readable ad names.
@@ -151,23 +154,32 @@ GROUP BY 1 ORDER BY 1
 
 Q: Which Facebook ads had the most subscriptions last 7 days?
 SQL:
+-- Pre-aggregate spend FIRST to avoid fan-out (spend_by_age has one row per age group)
+WITH spend AS (
+  SELECT
+    ad_id,
+    ad_name,
+    adset_name,
+    SUM(spend) AS total_spend
+  FROM `hopeful-list-429812-f3.facebook_api.spend_by_age`
+  WHERE date_start >= CURRENT_DATE() - 7
+  GROUP BY 1, 2, 3
+)
 SELECT
-  s.date_start AS date,
   s.ad_name,
   s.adset_name,
-  SUM(s.spend) AS spend,
+  s.total_spend,
   COUNT(DISTINCT f.user_id) AS subscriptions,
-  SAFE_DIVIDE(SUM(s.spend), COUNT(DISTINCT f.user_id)) AS cost_per_sub
-FROM `hopeful-list-429812-f3.facebook_api.spend_by_age` s
+  SAFE_DIVIDE(s.total_spend, COUNT(DISTINCT f.user_id)) AS cost_per_sub
+FROM spend s
 LEFT JOIN `hopeful-list-429812-f3.events.funnel-raw-table` f
   ON JSON_VALUE(f.event_metadata, '$.utm_ad') = CAST(s.ad_id AS STRING)
   AND f.event_name = 'pr_funnel_subscribe'
-  AND DATE(TIMESTAMP_ADD(f.timestamp, INTERVAL 300 MINUTE)) = s.date_start
+  AND DATE(TIMESTAMP_ADD(f.timestamp, INTERVAL 300 MINUTE)) >= CURRENT_DATE() - 7
   AND f.ip NOT LIKE '173.252%' AND f.ip NOT LIKE '69.171%'
   AND f.ip NOT LIKE '66.220%' AND f.ip NOT LIKE '31.13%'
   AND (f.user_agent NOT LIKE '%AdsBot%' OR f.user_agent IS NULL)
   AND (f.user_agent NOT LIKE '%facebookexternalhit%' OR f.user_agent IS NULL)
-WHERE s.date_start >= CURRENT_DATE() - 7
 GROUP BY 1, 2, 3
 ORDER BY subscriptions DESC
 LIMIT 500
