@@ -38,16 +38,18 @@ hopeful-list-429812-f3.events.app-raw-table
   Key event_names: pr_webapp_upsell_successful_purchase, pr_webapp_unsubscribed
 
 hopeful-list-429812-f3.facebook_api.spend_by_age
-  Purpose: Facebook ad spend by age group per day. Has one row per (date, ad, age_group).
+  Purpose: Facebook ad spend broken down by age group and day. One row per (date, ad, age_group).
   Key columns: date_start (DATE), ad_id, ad_name, adset_id, adset_name, account_id,
-               spend, impressions, inline_link_clicks, age
-  ⚠️ WARNING: ALWAYS pre-aggregate this table in a CTE before joining with events.
-  Joining directly causes spend to be multiplied by the number of age groups (~37x fan-out).
+               spend, impressions, inline_link_clicks, age (e.g. '18-24', '25-34', '35-44', '45-54', '55-64', '65+')
+  ⚠️ ALWAYS pre-aggregate into a CTE before joining with events (to collapse dates and avoid spend fan-out).
+  - Need totals by ad only?      → GROUP BY ad_id, ad_name, adset_name          (drop age)
+  - Need breakdown by ad + age?  → GROUP BY ad_id, ad_name, adset_name, age     (keep age)
+  Either way, collapse dates in the CTE first, then join the CTE to events.
 
 hopeful-list-429812-f3.facebook_api.spend_by_gender
-  Purpose: Facebook ad spend by gender per day. Has one row per (date, ad, gender).
-  Key columns: date_start (DATE), ad_id, ad_name, adset_id, adset_name, spend, gender
-  ⚠️ WARNING: ALWAYS pre-aggregate this table in a CTE before joining with events.
+  Purpose: Facebook ad spend broken down by gender and day. One row per (date, ad, gender).
+  Key columns: date_start (DATE), ad_id, ad_name, adset_id, adset_name, spend, gender ('male'/'female')
+  ⚠️ Same rule: pre-aggregate into a CTE first, keep or drop gender depending on whether breakdown is needed.
 
 hopeful-list-429812-f3.facebook_api.ad_info
   Purpose: Facebook ad metadata. Join on ad_id to get human-readable ad names.
