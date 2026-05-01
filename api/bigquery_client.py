@@ -43,6 +43,8 @@ class BigQueryClient:
         self.client = _get_bq_client()
         self.project = os.getenv("BQ_PROJECT_ID")
         self.datasets = [d.strip() for d in os.getenv("BQ_DATASETS", "").split(",") if d.strip()]
+        excluded = os.getenv("BQ_EXCLUDED_TABLES", "")
+        self._excluded = {t.strip() for t in excluded.split(",") if t.strip()}
         self.schema_string = self._build_schema_string()
 
     def _fetch_schema(self) -> dict[str, list[tuple[str, str]]]:
@@ -54,6 +56,8 @@ class BigQueryClient:
                 ORDER BY table_name, ordinal_position
             """
             for row in self.client.query(query).result():
+                if row.table_name in self._excluded:
+                    continue
                 key = f"{self.project}.{dataset}.{row.table_name}"
                 tables.setdefault(key, []).append((row.column_name, row.data_type))
         return tables
