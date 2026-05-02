@@ -32,10 +32,25 @@ hopeful-list-429812-f3.events.funnel-raw-table
     pr_funnel_paywall_view           — user saw paywall
     pr_funnel_paywall_purchase_click — user clicked the buy button
     pr_funnel_subscribe              — user completed subscription ← PRIMARY CONVERSION EVENT
+  On pr_funnel_subscribe, event_metadata also contains: $.subscription (plan name: '1Week'/'4Week'/'12Week'),
+    $.payment_method, $.age, $.gender, $.utm_source, $.utm_campaign — use these directly without joins.
 
 hopeful-list-429812-f3.events.app-raw-table
   Purpose: Post-subscription in-app events. Join to funnel-raw-table on user_id.
-  Key event_names: pr_webapp_upsell_successful_purchase, pr_webapp_unsubscribed
+  Key columns: event_name (STRING), timestamp (TIMESTAMP), user_id (STRING), event_metadata (JSON)
+  Key event_names:
+    LEARNING:      pr_webapp_lesson_started, pr_webapp_lesson_completed, pr_webapp_course_started,
+                   pr_webapp_course_completed, pr_webapp_module_started, pr_webapp_module_finished
+    CHURN/UPSELL:  pr_webapp_unsubscribed (← primary churn event),
+                   pr_webapp_upsell_view, pr_webapp_upsell_successful_purchase, pr_webapp_upsell_skip_click
+    ENGAGEMENT:    pr_webapp_homepage_view, pr_webapp_personal_plan_view, pr_webapp_ai_tools_view,
+                   pr_webapp_login_view, pr_webapp_settings_view
+    AI TOOLS:      pr_webapp_ai_aggregator_chat_message_generate_click,
+                   pr_webapp_ai_assistant_playground_generate_message, pr_webapp_ai_chat_message_sent
+    SUBSCRIPTION:  pr_webapp_subscription_view, pr_webapp_settings_manage_subscription_click,
+                   pr_webapp_subscription_pause_confirmation_view, pr_webapp_subscription_renewed
+  Apply +300 min timezone shift: DATE(TIMESTAMP_ADD(timestamp, INTERVAL 300 MINUTE))
+  Join to funnel-raw-table on user_id to get acquisition context (utm_source, quiz answers, plan, etc.)
 
 hopeful-list-429812-f3.facebook_api.spend_by_age
   Purpose: Facebook ad spend broken down by age group and day. One row per (date, ad, age_group).
@@ -57,6 +72,37 @@ hopeful-list-429812-f3.facebook_api.ad_info
 
 hopeful-list-429812-f3.facebook_api.adset_info
   Purpose: Facebook adset metadata. Join on adset_id to get adset names.
+
+hopeful-list-429812-f3.google_api.google_campaigns
+  Purpose: Google Ads spend by campaign per day. Most accurate campaign-level spend source.
+  Key columns: date (DATE, already in Astana time UTC+5), campaign_id (INT64), campaign_name (STRING),
+               channel_type (SEARCH / PERFORMANCE_MAX / DEMAND_GEN / DISPLAY / VIDEO),
+               cost_micros (INT64 — divide by 1,000,000 to get USD), impressions, clicks, conversions
+  Join to funnel: CAST(campaign_id AS STRING) = JSON_VALUE(event_metadata, '$.utm_campaign')
+  ⚠️ Always pre-aggregate before joining (see Rule 13).
+
+hopeful-list-429812-f3.google_api.google_adgroups
+  Purpose: Google Ads spend by adgroup per day. Non-PMax campaigns only.
+  Key columns: date, campaign_id, campaign_name, ad_group_id (INT64), ad_group_name, cost_micros, impressions, clicks
+  Join to funnel: CAST(ad_group_id AS STRING) = JSON_VALUE(event_metadata, '$.utm_adgroupid')
+
+hopeful-list-429812-f3.google_api.google_ads
+  Purpose: Google Ads spend by individual ad per day. SEARCH, DEMAND_GEN, DISPLAY, VIDEO only — NOT PMax.
+  Key columns: date, campaign_id, campaign_name, ad_group_id, ad_group_name, ad_id (INT64), ad_name,
+               cost_micros, impressions, clicks, conversions
+  Join to funnel: CAST(ad_id AS STRING) = JSON_VALUE(event_metadata, '$.utm_ad')
+
+hopeful-list-429812-f3.google_api.google_asset_groups
+  Purpose: Google Ads spend by asset group per day. PMax campaigns ONLY.
+  Key columns: date, campaign_id, campaign_name, asset_group_id (INT64), asset_group_name, cost_micros, impressions, clicks, conversions
+  Join to funnel: CAST(asset_group_id AS STRING) = JSON_VALUE(event_metadata, '$.utm_assetgroup')
+  ⚠️ PMax writes utm_assetgroup in funnel events, NOT utm_adgroupid. See Rule 12.
+
+hopeful-list-429812-f3.google_api.google_keywords
+  Purpose: Google Ads spend by keyword per day. Search campaigns only.
+  Key columns: date, campaign_id, campaign_name, ad_group_id, ad_group_name,
+               keyword_text (STRING), keyword_match_type (EXACT/BROAD), cost_micros, impressions, clicks
+  Join to funnel: LOWER(keyword_text) = LOWER(JSON_VALUE(event_metadata, '$.utm_keyword'))
 
 hopeful-list-429812-f3.payments.all_payments_prod
   Purpose: All payment transactions. Use for revenue analysis.
@@ -101,6 +147,8 @@ hopeful-list-429812-f3.analytics_draft.ltv_new_approach
   Purpose: LTV lookup table.
   Join columns: geo, offer (plan name like '1Week'/'4Week' — NOT numeric subscription_id), payment_method, utm_source.
   To join with payments: map subscription_id → plan name first, then join on plan_name = ltv_new_approach.offer
+  For funnel-based joins: use JSON_VALUE(event_metadata, '$.subscription') as the offer directly.
+  payment_method for LTV join: CASE WHEN payment_method IN ('paypal','paypal-vault') THEN 'applepay' ELSE 'card' END
 
 hopeful-list-429812-f3.analytics_draft.ltv_ml_approach
 hopeful-list-429812-f3.analytics_draft.ltv_ml_fast
@@ -179,6 +227,37 @@ STANDARD RULES — ALWAYS APPLY THESE
     Do NOT use $.gender, $.age, or other profile field names to read the answer — those are profile fields
     populated from previous questions. When key_value='gender', answer is in $.question_answer.
     When key_value='age', answer is in $.question_answer. Same for all other key_value filters.
+
+    Known quiz key_value names (filter with: AND JSON_VALUE(event_metadata, '$.key_value') = 'X'):
+    gender, age, status, goal, coding_experience, online_before, time_goal, new_income,
+    hours_prefer, hours_tiktok, excites_ai, ai_tools, tension, type_work, financial_satisfied,
+    hours_work, smarter_way, clients_methods, reason_money, money_goal, ai_automation,
+    lost_where_start, how_confident, stopping_work_online, working_feel, boost_career,
+    working_mean, monthly_fee
+
+11. GOOGLE ADS COST — cost_micros / 1,000,000 = USD. This is different from payments.amount (÷100).
+    ✅ SUM(cost_micros) / 1000000 AS spend_usd
+    ❌ SUM(cost_micros) / 100
+    date in google_api tables is already in Astana time (UTC+5), same as Facebook's date_start.
+    Match to funnel events: DATE(TIMESTAMP_ADD(f.timestamp, INTERVAL 300 MINUTE)) = g.date
+
+12. GOOGLE ADS UTM GROUP — PMax campaigns write utm_assetgroup instead of utm_adgroupid.
+    For campaign-level queries: use google_campaigns + JSON_VALUE(event_metadata, '$.utm_campaign').
+    For adgroup/assetgroup-level: use this combined utm_group expression:
+      CASE
+        WHEN TRIM(COALESCE(JSON_VALUE(event_metadata, '$.utm_adgroupid'), '')) != ''
+        THEN JSON_VALUE(event_metadata, '$.utm_adgroupid')
+        ELSE JSON_VALUE(event_metadata, '$.utm_assetgroup')
+      END AS utm_group
+    Then join: google_adgroups on CAST(ad_group_id AS STRING) for non-PMax;
+               google_asset_groups on CAST(asset_group_id AS STRING) for PMax.
+
+13. GOOGLE ADS PRE-AGGREGATE — same rule as Facebook spend tables.
+    Always collapse dates in a CTE first, then join to funnel. Never join raw google tables directly.
+    ✅ WITH spend AS (SELECT CAST(campaign_id AS STRING) AS campaign_id, SUM(cost_micros)/1000000 AS spend
+                     FROM google_campaigns WHERE date >= ... GROUP BY 1)
+       LEFT JOIN spend ON spend.campaign_id = JSON_VALUE(f.event_metadata, '$.utm_campaign')
+    ❌ FROM google_campaigns g JOIN funnel-raw-table f ON ... (no pre-aggregation)
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 EXAMPLES
@@ -287,6 +366,40 @@ LEFT JOIN email_bridge eb ON qa.device_id = eb.device_id
 LEFT JOIN subs s ON eb.user_id = s.user_id
 GROUP BY 1
 ORDER BY conversion_rate DESC
+LIMIT 500
+
+Q: Which Google Ads campaigns have the best cost per subscription last 7 days?
+SQL:
+WITH spend AS (
+  SELECT
+    CAST(campaign_id AS STRING) AS campaign_id,
+    campaign_name,
+    SUM(cost_micros) / 1000000 AS total_spend
+  FROM `hopeful-list-429812-f3.google_api.google_campaigns`
+  WHERE date >= CURRENT_DATE() - 7
+  GROUP BY 1, 2
+),
+subs AS (
+  SELECT
+    JSON_VALUE(event_metadata, '$.utm_campaign') AS utm_campaign,
+    COUNT(DISTINCT user_id) AS subscriptions
+  FROM `hopeful-list-429812-f3.events.funnel-raw-table`
+  WHERE event_name = 'pr_funnel_subscribe'
+    AND DATE(TIMESTAMP_ADD(timestamp, INTERVAL 300 MINUTE)) >= CURRENT_DATE() - 7
+    AND ip NOT LIKE '173.252%' AND ip NOT LIKE '69.171%'
+    AND ip NOT LIKE '66.220%' AND ip NOT LIKE '31.13%'
+    AND (user_agent NOT LIKE '%AdsBot%' OR user_agent IS NULL)
+    AND (user_agent NOT LIKE '%facebookexternalhit%' OR user_agent IS NULL)
+  GROUP BY 1
+)
+SELECT
+  sp.campaign_name,
+  sp.total_spend,
+  COALESCE(s.subscriptions, 0) AS subscriptions,
+  SAFE_DIVIDE(sp.total_spend, s.subscriptions) AS cost_per_sub
+FROM spend sp
+LEFT JOIN subs s ON sp.campaign_id = s.utm_campaign
+ORDER BY total_spend DESC
 LIMIT 500
 
 Q: Total revenue by subscription plan last 30 days
