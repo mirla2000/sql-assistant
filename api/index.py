@@ -35,7 +35,8 @@ def _get_clients():
 @app.post("/query", response_model=QueryResponse)
 async def query(request: QueryRequest):
     bq, claude = _get_clients()
-    sql = claude.generate_sql(request.question)
+    history = [m.model_dump() for m in request.history]
+    sql = claude.generate_sql(request.question, history)
     try:
         columns, rows = bq.execute_query(sql)
         return QueryResponse(sql=sql, columns=columns, rows=rows, row_count=len(rows))

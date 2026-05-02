@@ -481,19 +481,21 @@ class ClaudeClient:
         )
         self.system_prompt = _SYSTEM_TEMPLATE.format(schema=schema_string)
 
-    def _call(self, prompt: str) -> str:
+    def _call(self, question: str, history: list[dict] = []) -> str:
+        messages = [
+            {"role": "system", "content": self.system_prompt},
+            *[{"role": m["role"], "content": m["content"]} for m in history],
+            {"role": "user", "content": question},
+        ]
         response = self.client.chat.completions.create(
             model="google/gemini-3-flash-preview",
-            messages=[
-                {"role": "system", "content": self.system_prompt},
-                {"role": "user", "content": prompt},
-            ],
+            messages=messages,
             temperature=0.0,
         )
         return _clean_sql(response.choices[0].message.content)
 
-    def generate_sql(self, question: str) -> str:
-        return self._call(question)
+    def generate_sql(self, question: str, history: list[dict] = []) -> str:
+        return self._call(question, history)
 
     def fix_sql(self, failed_sql: str, error: str) -> str:
         return self._call(_FIX_TEMPLATE.format(sql=failed_sql, error=error))

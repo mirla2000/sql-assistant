@@ -43,8 +43,30 @@ body {
 }
 
 .sidebar-header {
-  padding: 20px 16px 16px;
+  padding: 14px 12px 14px 16px;
   border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.new-chat-btn {
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-muted);
+  font-size: 12px;
+  padding: 5px 10px;
+  cursor: pointer;
+  transition: all 0.15s;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.new-chat-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
 }
 
 .logo {
@@ -106,17 +128,6 @@ body {
   color: var(--text-muted);
 }
 
-/* Loading */
-.loading-state {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  height: 100%;
-  gap: 16px;
-  color: var(--text-muted);
-}
-
 .spinner {
   width: 32px;
   height: 32px;
@@ -127,20 +138,6 @@ body {
 }
 
 @keyframes spin { to { transform: rotate(360deg); } }
-
-/* Result */
-.result {
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-}
-
-.result-question {
-  font-size: 20px;
-  font-weight: 600;
-  color: var(--text);
-  line-height: 1.4;
-}
 
 .error-box {
   background: #1f1315;
@@ -390,3 +387,58 @@ textarea::placeholder { color: var(--text-muted); }
 
 .send-btn:hover:not(:disabled) { background: var(--accent-hover); }
 .send-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* Chat Thread */
+.chat-thread {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  padding-bottom: 8px;
+}
+
+.chat-msg {
+  display: flex;
+  flex-direction: column;
+}
+
+.chat-msg.user {
+  align-items: flex-end;
+}
+
+.chat-msg.assistant {
+  align-items: flex-start;
+  width: 100%;
+}
+
+.user-bubble {
+  background: var(--accent);
+  color: white;
+  border-radius: 18px 18px 4px 18px;
+  padding: 10px 16px;
+  max-width: 72%;
+  font-size: 14px;
+  line-height: 1.5;
+  word-break: break-word;
+}
+
+.assistant-bubble {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.loading-bubble {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--text-muted);
+  font-size: 13px;
+  padding: 4px 0;
+}
+
+.spinner.small {
+  width: 18px;
+  height: 18px;
+  border-width: 2px;
+}

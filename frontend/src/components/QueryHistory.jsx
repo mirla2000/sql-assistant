@@ -1,25 +1,26 @@
-export default function QueryHistory({ history, onSelect, current }) {
-  if (history.length === 0) {
-    return <div className="history-empty">No queries yet</div>
+export default function QueryHistory({ conversations, onSelect }) {
+  if (conversations.length === 0) {
+    return <div className="history-empty">No previous conversations</div>
   }
 
   return (
     <div className="history-list">
-      {history.map((entry, i) => (
-        <div
-          key={i}
-          className={`history-item ${entry === current ? 'active' : ''}`}
-          onClick={() => onSelect(entry)}
-        >
-          <div className="history-question">
-            {entry.error && <span className="history-error-dot" title="Query failed" />}
-            {entry.question}
+      {conversations.map((conv) => {
+        const msgCount = conv.messages.filter(m => m.role === 'user').length
+        return (
+          <div
+            key={conv.id}
+            className="history-item"
+            onClick={() => onSelect(conv)}
+          >
+            <div className="history-question">{conv.firstQuestion}</div>
+            <div className="history-time">
+              {conv.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+              {' · '}{msgCount} {msgCount === 1 ? 'message' : 'messages'}
+            </div>
           </div>
-          <div className="history-time">
-            {entry.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-          </div>
-        </div>
-      ))}
+        )
+      })}
     </div>
   )
 }
