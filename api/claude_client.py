@@ -108,9 +108,13 @@ hopeful-list-429812-f3.payments.all_payments_prod
   Purpose: All payment transactions. Use for revenue analysis.
   Key columns: order_id, customer_account_id, amount (IN CENTS — divide by 100),
                currency, status, payment_type ('first'/'upsell'/'recurring'),
-               subscription_id (NUMERIC ID — see mapping below), channel, date,
-               created_at (INTEGER — Unix timestamp in microseconds, use timestamp_micros(created_at) to convert)
-  Use created_at for precise transaction time. Both created_at and exchange_rate are UTC — no timezone shift needed.
+               subscription_id (NUMERIC ID — see mapping below), channel, mid,
+               created_at (INTEGER — Unix timestamp in microseconds)
+  DATE HANDLING: Always use created_at for date filtering and grouping — NOT the date column.
+    Convert with: DATE(TIMESTAMP_MICROS(created_at)) for date, or TIMESTAMP_MICROS(created_at) for full timestamp.
+    No timezone shift needed — created_at is UTC.
+    ✅ WHERE DATE(TIMESTAMP_MICROS(p.created_at)) >= CURRENT_DATE() - 30
+    ✅ DATE_TRUNC(DATE(TIMESTAMP_MICROS(p.created_at)), MONTH) AS month
   ALWAYS filter: WHERE status = 'settled'
 
   subscription_id → plan name mapping (subscription_id is numeric, NOT '1Week'/'4Week' etc.):
@@ -153,6 +157,23 @@ hopeful-list-429812-f3.analytics_draft.ltv_new_approach
 hopeful-list-429812-f3.analytics_draft.ltv_ml_approach
 hopeful-list-429812-f3.analytics_draft.ltv_ml_fast
   Purpose: ML-predicted LTV per user. Join on: customer_account_id.
+  Key columns: customer_account_id, ltv (FLOAT64 — total predicted LTV), ltv_recurring (FLOAT64 — predicted recurring revenue only)
+
+  FULL LTV CALCULATION PATTERN (gross by default):
+  Total gross LTV = actual ARPPU (first + upsell from payments) + predicted recurring (ltv_recurring)
+    WITH user_arppu AS (
+      SELECT customer_account_id,
+        SUM(CASE WHEN payment_type = 'upsell' THEN amount/100 ELSE 0 END) AS upsell_gross,
+        SUM(CASE WHEN payment_type = 'first'  THEN amount/100 ELSE 0 END) AS first_gross
+      FROM `hopeful-list-429812-f3.payments.all_payments_prod`
+      WHERE status = 'settled' AND payment_type IN ('first','upsell')
+      GROUP BY 1
+    )
+    total_ltv_gross = first_gross + upsell_gross + ltv_ml_fast.ltv_recurring
+
+  Optional net calculation (apply CoR):
+    net_ltv = first_gross * 0.85 + upsell_gross * 0.83 + ltv_recurring * 0.85
+  Default: show gross values unless user explicitly asks for net/CoR.
 
 Additional schema from BigQuery:
 {schema}
@@ -423,10 +444,10 @@ SELECT
   ROUND(SUM(p.amount * COALESCE(ex.exchange_rate, 1)) / 100, 2) AS revenue_usd
 FROM `hopeful-list-429812-f3.payments.all_payments_prod` p
 LEFT JOIN `hopeful-list-429812-f3.analytics_draft.exchange_rate` ex
-  ON p.currency = ex.currency AND p.date = ex.date
+  ON p.currency = ex.currency AND DATE(TIMESTAMP_MICROS(p.created_at)) = ex.date
 WHERE p.status = 'settled'
   AND p.payment_type = 'first'
-  AND p.date >= CURRENT_DATE() - 30
+  AND DATE(TIMESTAMP_MICROS(p.created_at)) >= CURRENT_DATE() - 30
 GROUP BY 1
 ORDER BY revenue_usd DESC
 LIMIT 500
