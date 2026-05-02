@@ -235,6 +235,11 @@ STANDARD RULES — ALWAYS APPLY THESE
     lost_where_start, how_confident, stopping_work_online, working_feel, boost_career,
     working_mean, monthly_fee
 
+    ORDERING: Always ORDER BY users_answered DESC (not conversion_rate) to show meaningful sample
+    sizes first. Include conversion_rate as a column but don't sort by it — small samples create
+    misleading 100% rates. If user explicitly wants minimum sample size, add:
+      HAVING COUNT(DISTINCT qa.device_id) >= 50
+
 11. GOOGLE ADS COST — cost_micros / 1,000,000 = USD. This is different from payments.amount (÷100).
     ✅ SUM(cost_micros) / 1000000 AS spend_usd
     ❌ SUM(cost_micros) / 100
@@ -365,7 +370,7 @@ FROM quiz_answers qa
 LEFT JOIN email_bridge eb ON qa.device_id = eb.device_id
 LEFT JOIN subs s ON eb.user_id = s.user_id
 GROUP BY 1
-ORDER BY conversion_rate DESC
+ORDER BY users_answered DESC
 LIMIT 500
 
 Q: Which Google Ads campaigns have the best cost per subscription last 7 days?
