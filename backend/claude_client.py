@@ -711,11 +711,29 @@ Layout width (12-column grid):
 - w: 6  = half-width chart
 - w: 12 = full-width chart or table
 
-Constraints:
-- Generate 3-6 charts total
-- Each SQL must be self-contained and independently runnable
-- Add LIMIT 1000 to all SQL queries
-- Use the same timezone/bot-filter/date rules as in the SQL rules above
+SQL rules specific to dashboard mode:
+1. ALWAYS apply the FULL bot filter to every events table query:
+   AND ip NOT LIKE '173.252%' AND ip NOT LIKE '69.171%'
+   AND ip NOT LIKE '66.220%' AND ip NOT LIKE '31.13%'
+   AND (user_agent NOT LIKE '%AdsBot%' OR user_agent IS NULL)
+   AND (user_agent NOT LIKE '%facebookexternalhit%' OR user_agent IS NULL)
+   AND (user_agent NOT LIKE '%Google-Read-Aloud%' OR user_agent IS NULL)
+
+2. RATES AND PERCENTAGES: always multiply by 100 and round.
+   ✅ ROUND(SAFE_DIVIDE(...) * 100, 2) AS cvr_percent
+   ❌ SAFE_DIVIDE(...) AS cvr_percent
+
+3. CHART Y-AXIS: only put columns with similar scale in the same chart's y array.
+   ❌ y: ["spend", "roas"] — spend is thousands, roas is 1-3, they cannot share an axis
+   ✅ Put spend and LTV in one chart, put ROAS as a separate "number" card
+   For "number" type KPI cards, the SQL should return exactly 1 row.
+
+4. LTV JOINS: always use LEFT JOIN for ltv_ml_fast, never INNER JOIN.
+   ✅ LEFT JOIN ltv_ml_fast l ON l.customer_account_id = f.user_id
+   Use COALESCE(l.ltv, 0) for null handling.
+
+5. Generate 3-6 charts total. Each SQL must be self-contained and independently runnable.
+   Add LIMIT 1000 to all SQL queries.
 """
 
 
