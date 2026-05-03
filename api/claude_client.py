@@ -58,15 +58,20 @@ hopeful-list-429812-f3.facebook_api.spend_by_age
   Key columns: date_start (DATE in Astana time = UTC+5), ad_id, ad_name, adset_id, adset_name,
                spend, impressions, inline_link_clicks, age ('18-24','25-34','35-44','45-54','55-64','65+')
   ⚠️ ALWAYS pre-aggregate into a CTE before joining with events (to collapse dates and avoid spend fan-out).
+  - Need totals by adset?        → GROUP BY adset_id, adset_name                (drop ad and age)
   - Need totals by ad only?      → GROUP BY ad_id, ad_name, adset_name          (drop age)
   - Need breakdown by ad + age?  → GROUP BY ad_id, ad_name, adset_name, age     (keep age)
   Either way, collapse dates in the CTE first, then join the CTE to events.
   When joining to events: match on DATE(TIMESTAMP_ADD(f.timestamp, INTERVAL 300 MINUTE)) = s.date_start
+  UTM join keys from funnel event_metadata:
+    adset level: CAST(adset_id AS STRING) = JSON_VALUE(event_metadata, '$.utm_adset')
+    ad level:    CAST(ad_id    AS STRING) = JSON_VALUE(event_metadata, '$.utm_ad')
 
 hopeful-list-429812-f3.facebook_api.spend_by_gender
   Purpose: Facebook ad spend broken down by gender and day. One row per (date, ad, gender).
   Key columns: date_start (DATE in Astana time), ad_id, ad_name, adset_id, adset_name, spend, gender ('male'/'female')
   ⚠️ Same pre-aggregation rule. gender values here are only 'male', 'female', 'unknown'.
+  UTM join keys: same as spend_by_age (adset_id → utm_adset, ad_id → utm_ad).
 
 hopeful-list-429812-f3.facebook_api.ad_info
   Purpose: Facebook ad metadata. Join on ad_id to get human-readable ad names.
