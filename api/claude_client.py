@@ -232,6 +232,9 @@ hopeful-list-429812-f3.analytics_draft.ltv_ml_fast
   Purpose: PRIMARY ML-predicted LTV per user. Join on: customer_account_id.
   Key columns: customer_account_id, ltv (FLOAT64 — total predicted LTV), ltv_recurring (FLOAT64 — predicted recurring only)
   Use ltv_ml_fast as the default LTV source. ltv_ml_approach is not used.
+  ⚠️ NEVER join ltv_ml_fast and all_payments_prod in the same CTE on the same user.
+     A user can have many payment rows — joining both tables together multiplies LTV rows causing wrong AVG/SUM.
+     Always use separate CTEs: one for LTV, one for payments/upsell.
 
   FULL LTV CALCULATION PATTERN (gross by default):
   Total gross LTV = actual ARPPU (first + upsell from payments) + ltv_recurring (predicted future recurring)
