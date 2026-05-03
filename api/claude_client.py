@@ -607,6 +607,53 @@ WHERE p.status = 'settled'
 GROUP BY 1
 ORDER BY revenue_usd DESC
 LIMIT 500
+
+Q: Show VAMP rate by month starting from January 2026
+SQL:
+WITH tc40 AS (
+  SELECT DATE_TRUNC(fraud_issue_date, MONTH) AS month, COUNT(*) AS cnt
+  FROM `hopeful-list-429812-f3.analytics_draft.fraud_final`
+  WHERE LOWER(card_brand) = 'visa'
+    AND fraud_issue_date >= '2026-01-01'
+  GROUP BY 1
+),
+tc15 AS (
+  SELECT DATE_TRUNC(dispute_issue_date, MONTH) AS month, COUNT(*) AS cnt
+  FROM `hopeful-list-429812-f3.analytics_draft.chargebacks_final`
+  WHERE LOWER(card_brand) = 'visa'
+    AND reason_code_processed = '10.4'
+    AND dispute_issue_date >= '2026-01-01'
+  GROUP BY 1
+),
+resolved AS (
+  SELECT DATE_TRUNC(dispute_issue_date, MONTH) AS month, COUNT(*) AS cnt
+  FROM `hopeful-list-429812-f3.analytics_draft.chargebacks_final`
+  WHERE LOWER(card_brand) = 'visa'
+    AND status_processed = 'resolved'
+    AND dispute_issue_date >= '2026-01-01'
+  GROUP BY 1
+),
+total_txn AS (
+  SELECT DATE_TRUNC(DATE(TIMESTAMP_MICROS(created_at)), MONTH) AS month, COUNT(*) AS cnt
+  FROM `hopeful-list-429812-f3.payments.all_payments_prod`
+  WHERE LOWER(card_brand) = 'visa'
+    AND status = 'settled'
+    AND DATE(TIMESTAMP_MICROS(created_at)) >= '2026-01-01'
+  GROUP BY 1
+)
+SELECT
+  t.month,
+  COALESCE(f.cnt, 0) AS tc40,
+  COALESCE(c.cnt, 0) AS tc15,
+  COALESCE(r.cnt, 0) AS resolved,
+  t.cnt AS total_visa_transactions,
+  SAFE_DIVIDE(COALESCE(f.cnt,0) + COALESCE(c.cnt,0) - COALESCE(r.cnt,0), t.cnt) AS vamp_rate
+FROM total_txn t
+LEFT JOIN tc40 f ON t.month = f.month
+LEFT JOIN tc15 c ON t.month = c.month
+LEFT JOIN resolved r ON t.month = r.month
+ORDER BY t.month DESC
+LIMIT 500
 """
 
 _FIX_TEMPLATE = """\
