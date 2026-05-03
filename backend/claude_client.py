@@ -22,7 +22,8 @@ DATASETS AND TABLES
 hopeful-list-429812-f3.events.funnel-raw-table
   Purpose: ALL web funnel events — use this for subscription counts, funnel analysis, quiz data, UTM attribution.
   Key columns: event_name (STRING), timestamp (TIMESTAMP), device_id (STRING), user_id (STRING),
-               ip (STRING), user_agent (STRING), country (STRING), event_metadata (JSON)
+               ip (STRING), user_agent (STRING), country (STRING), country_code (STRING), event_metadata (JSON)
+  Note: country and country_code both contain the same 2-letter code. Use either; COALESCE(country, country_code) if needed.
   Filter by event_name to get specific funnel steps:
     pr_funnel_landing_page_view      — user visited landing page (use device_id as user identifier, user_id is NULL here)
     pr_funnel_click                  — user answered a quiz question (user_id is NULL here — use device_id)
@@ -105,17 +106,39 @@ hopeful-list-429812-f3.google_api.google_keywords
   Join to funnel: LOWER(keyword_text) = LOWER(JSON_VALUE(event_metadata, '$.utm_keyword'))
 
 hopeful-list-429812-f3.payments.all_payments_prod
-  Purpose: All payment transactions. Use for revenue analysis.
+  Purpose: All payment transactions (settled and declined). Use for revenue analysis.
   Key columns: order_id, customer_account_id, amount (IN CENTS — divide by 100),
-               currency, status, payment_type ('first'/'upsell'/'recurring'),
-               subscription_id (NUMERIC ID — see mapping below), channel, mid,
-               created_at (INTEGER — Unix timestamp in microseconds)
-  DATE HANDLING: Always use created_at for date filtering and grouping — NOT the date column.
-    Convert with: DATE(TIMESTAMP_MICROS(created_at)) for date, or TIMESTAMP_MICROS(created_at) for full timestamp.
-    No timezone shift needed — created_at is UTC.
-    ✅ WHERE DATE(TIMESTAMP_MICROS(p.created_at)) >= CURRENT_DATE() - 30
-    ✅ DATE_TRUNC(DATE(TIMESTAMP_MICROS(p.created_at)), MONTH) AS month
+               currency, status ('settled'/'declined'), channel, mid,
+               date (DATE — use this for date filtering, already truncated to day),
+               created_at (INT64 — microsecond timestamp, use TIMESTAMP_MICROS(created_at) for full precision),
+               payment_type, payment_method, subscription_id, paid_count,
+               card_brand, card_type, geo_country, subscription_cohort_date
+  DATE HANDLING: Use date (DATE) for filtering — it is the simplest and most reliable.
+    ✅ WHERE p.date >= CURRENT_DATE() - 30
+    ✅ DATE_TRUNC(p.date, MONTH) AS month
+    Use created_at only when you need hour/minute precision.
   ALWAYS filter: WHERE status = 'settled'
+
+  payment_type values: 'first' (trial), 'recurring' (rebill), 'upsell', 'first_verification' ($1 card check — exclude from revenue)
+
+  payment_method values: 'card', 'applepay', 'googlepay', 'paypal', 'paypal-vault', 'recurring' (solidgate only)
+  PAYMENT METHOD NORMALIZATION — treat as 3 groups:
+    card:     payment_method = 'card' (includes googlepay for LTV purposes)
+    applepay: payment_method = 'applepay'
+    paypal:   payment_method IN ('paypal', 'paypal-vault')
+  For LTV joins, map: paypal → 'applepay', everything else → 'card'
+
+  paid_count — billing cycle counter (use this, NOT rebill_count which has bugs):
+    payment_type='first', status='settled'  → paid_count=0 (completed trial)
+    payment_type='recurring', 1st rebill    → paid_count=1
+    payment_type='recurring', 2nd rebill    → paid_count=2
+    On decline: paid_count stays at current cycle (shows where user is in billing cycle)
+
+  card_brand normalization — values are inconsistent across sources, always LOWER() when filtering:
+    visa: VISA, Visa, visa
+    mastercard: Mastercard, MASTERCARD, mastercard
+    amex: AMEX, Amex, american express, amex
+    Use: LOWER(card_brand) IN ('visa', 'mastercard') etc.
 
   subscription_id → plan name mapping (subscription_id is numeric, NOT '1Week'/'4Week' etc.):
     CASE
@@ -148,19 +171,18 @@ hopeful-list-429812-f3.analytics_draft.exchange_rate
   Purpose: Currency → USD rates. Join on: p.currency = ex.currency AND p.date = ex.date
 
 hopeful-list-429812-f3.analytics_draft.ltv_new_approach
-  Purpose: LTV lookup table.
-  Join columns: geo, offer (plan name like '1Week'/'4Week' — NOT numeric subscription_id), payment_method, utm_source.
-  To join with payments: map subscription_id → plan name first, then join on plan_name = ltv_new_approach.offer
-  For funnel-based joins: use JSON_VALUE(event_metadata, '$.subscription') as the offer directly.
-  payment_method for LTV join: CASE WHEN payment_method IN ('paypal','paypal-vault') THEN 'applepay' ELSE 'card' END
+  Purpose: Old LTV lookup table — use as reference only. Primary model is now ltv_ml_fast.
+  Join columns: geo ('T1'/'WW'), offer ('1Week'/'4Week'/'12Week' — '1Month'/'3Month'/'1Year' are obsolete),
+                payment_method ('applepay'/'card'), utm_source ('facebook'/'google'/'tiktok'/'other')
+  For LTV join: map payment_method IN ('paypal','paypal-vault') → 'applepay', else → 'card'
 
-hopeful-list-429812-f3.analytics_draft.ltv_ml_approach
 hopeful-list-429812-f3.analytics_draft.ltv_ml_fast
-  Purpose: ML-predicted LTV per user. Join on: customer_account_id.
-  Key columns: customer_account_id, ltv (FLOAT64 — total predicted LTV), ltv_recurring (FLOAT64 — predicted recurring revenue only)
+  Purpose: PRIMARY ML-predicted LTV per user. Join on: customer_account_id.
+  Key columns: customer_account_id, ltv (FLOAT64 — total predicted LTV), ltv_recurring (FLOAT64 — predicted recurring only)
+  Use ltv_ml_fast as the default LTV source. ltv_ml_approach is not used.
 
   FULL LTV CALCULATION PATTERN (gross by default):
-  Total gross LTV = actual ARPPU (first + upsell from payments) + predicted recurring (ltv_recurring)
+  Total gross LTV = actual ARPPU (first + upsell from payments) + ltv_recurring (predicted future recurring)
     WITH user_arppu AS (
       SELECT customer_account_id,
         SUM(CASE WHEN payment_type = 'upsell' THEN amount/100 ELSE 0 END) AS upsell_gross,
@@ -170,9 +192,7 @@ hopeful-list-429812-f3.analytics_draft.ltv_ml_fast
       GROUP BY 1
     )
     total_ltv_gross = first_gross + upsell_gross + ltv_ml_fast.ltv_recurring
-
-  Optional net calculation (apply CoR):
-    net_ltv = first_gross * 0.85 + upsell_gross * 0.83 + ltv_recurring * 0.85
+  Optional net: net_ltv = first_gross * 0.85 + upsell_gross * 0.83 + ltv_recurring * 0.85
   Default: show gross values unless user explicitly asks for net/CoR.
 
 Additional schema from BigQuery:
@@ -277,6 +297,14 @@ STANDARD RULES — ALWAYS APPLY THESE
       END AS utm_group
     Then join: google_adgroups on CAST(ad_group_id AS STRING) for non-PMax;
                google_asset_groups on CAST(asset_group_id AS STRING) for PMax.
+
+14. DEVICE TYPE — detect from user_agent when segmenting by device:
+    CASE
+      WHEN REGEXP_CONTAINS(LOWER(user_agent), r'iphone|ipad|ipod|android|windows phone|mobile|tablet') THEN 'mobile'
+      WHEN REGEXP_CONTAINS(LOWER(user_agent), r'macintosh|windows nt|linux x86_64|cros') THEN 'desktop'
+      ELSE 'other'
+    END AS device_type
+    Apply to funnel-raw-table or app-raw-table queries when user asks for mobile vs desktop breakdown.
 
 13. GOOGLE ADS PRE-AGGREGATE — same rule as Facebook spend tables.
     Always collapse dates in a CTE first, then join to funnel. Never join raw google tables directly.
@@ -444,10 +472,10 @@ SELECT
   ROUND(SUM(p.amount * COALESCE(ex.exchange_rate, 1)) / 100, 2) AS revenue_usd
 FROM `hopeful-list-429812-f3.payments.all_payments_prod` p
 LEFT JOIN `hopeful-list-429812-f3.analytics_draft.exchange_rate` ex
-  ON p.currency = ex.currency AND DATE(TIMESTAMP_MICROS(p.created_at)) = ex.date
+  ON p.currency = ex.currency AND p.date = ex.date
 WHERE p.status = 'settled'
   AND p.payment_type = 'first'
-  AND DATE(TIMESTAMP_MICROS(p.created_at)) >= CURRENT_DATE() - 30
+  AND p.date >= CURRENT_DATE() - 30
 GROUP BY 1
 ORDER BY revenue_usd DESC
 LIMIT 500
