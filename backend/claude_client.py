@@ -164,6 +164,42 @@ hopeful-list-429812-f3.payments.all_payments_prod
       WHERE payment_type = 'first' AND channel = 'solidgate' AND status = 'settled'
     ) first_pay ON p.customer_account_id = first_pay.customer_account_id
 
+hopeful-list-429812-f3.analytics_draft.fraud_final
+  Purpose: All fraud transactions. One row per fraud event. Join to all_payments_prod on order_id.
+  Key columns: order_id, customer_account_id, fraud_amount_usd (FLOAT64), fraud_issue_date (DATE),
+               date_of_transaction (DATE), payment_method, payment_method_first, card_brand, channel, mid
+  Join: fraud_final.order_id = all_payments_prod.order_id
+
+hopeful-list-429812-f3.analytics_draft.chargebacks_final
+  Purpose: All chargeback disputes. Join to all_payments_prod on order_id.
+  Key columns: dispute_id, order_id, customer_account_id, dispute_amount_usd (FLOAT64),
+               dispute_issue_date (DATE), date_of_transaction (DATE),
+               status_processed (STRING — use this, NOT status),
+               reason_code_processed (STRING — use this, NOT reason_code),
+               payment_method, payment_method_first, card_brand, channel, mid, dispute_updated_at
+  ⚠️ Always use status_processed and reason_code_processed (normalized), not the raw status/reason_code columns.
+  Active chargebacks: WHERE status_processed != 'resolved'
+
+hopeful-list-429812-f3.analytics_draft.solid_paypal_disputes
+  Purpose: PayPal disputes only (separate from card chargebacks).
+  Key columns: dispute_id, order_id, customer_account_id, dispute_amount (INT64), dispute_currency,
+               dispute_outcome, status, dispute_life_cycle_stage, dispute_channel,
+               dispute_create_time (TIMESTAMP), dispute_modified_time (TIMESTAMP)
+  Dispute type classification:
+    Internal inquiry:    dispute_channel='INTERNAL' AND dispute_life_cycle_stage='INQUIRY'
+    Claim:               dispute_channel='INTERNAL' AND dispute_life_cycle_stage IN ('CHARGEBACK','PRE_ARBITRATION','ARBITRATION')
+    External chargeback: dispute_channel='EXTERNAL' AND dispute_life_cycle_stage IN ('CHARGEBACK','PRE_ARBITRATION','ARBITRATION')
+
+hopeful-list-429812-f3.analytics_draft.refund_processed
+  Purpose: All refunds. One row per refund. Join to all_payments_prod on order_id.
+  Key columns: refund_id, order_id, customer_account_id, refund_amount (INT64 in cents),
+               refund_currency, refund_status, refund_created_at (TIMESTAMP),
+               refund_type, refund_reason, payment_type, channel, mid,
+               subscription_cohort_date (DATE), geo_country, support_agent_email
+  refund_type values: support_request, Mastercard Alert, Visa CDRN, Visa RDR, Ethoca, RDR,
+                      paypal_dispute, pointai, Order Insight
+  ⚠️ Data quality: payment_type 'Regular'='first', 'Recurring'='recurring'; card_brand may be uppercase
+
 hopeful-list-429812-f3.analytics_draft.active_users
   Purpose: Current active subscribers with cohort and geo data.
 
