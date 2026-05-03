@@ -675,9 +675,53 @@ Please fix the SQL and return only the corrected query, no explanation.\
 """
 
 
+_DASHBOARD_SUFFIX = """
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+DASHBOARD MODE — OUTPUT FORMAT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Return ONLY a JSON object — no explanation, no markdown, no backticks.
+All SQL rules from above apply to every query in the spec.
+
+JSON format:
+{
+  "version": "1.0",
+  "title": "Dashboard title",
+  "charts": [
+    {
+      "id": "unique_snake_case_id",
+      "title": "Chart title",
+      "business_question": "What question this chart answers",
+      "type": "line|bar|number|table",
+      "sql": "SELECT ... LIMIT 1000",
+      "x": "x_axis_column_name",
+      "y": ["y_column1"],
+      "layout": {"w": 6, "h": 4}
+    }
+  ]
+}
+
+Chart type rules:
+- "line":   date/time x column + 1-2 numeric y columns (for trends over time)
+- "bar":    categorical x column + numeric y column (comparisons, ≤30 categories)
+- "number": returns exactly 1 row with 1-3 numeric values — for KPI cards
+- "table":  all other cases, complex multi-column results
+
+Layout width (12-column grid):
+- w: 3  = small KPI number card
+- w: 6  = half-width chart
+- w: 12 = full-width chart or table
+
+Constraints:
+- Generate 3-6 charts total
+- Each SQL must be self-contained and independently runnable
+- Add LIMIT 1000 to all SQL queries
+- Use the same timezone/bot-filter/date rules as in the SQL rules above
+"""
+
+
 def _clean_sql(text: str) -> str:
     text = text.strip()
-    text = re.sub(r"^```(?:sql)?\s*", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"^```(?:sql|json)?\s*", "", text, flags=re.IGNORECASE)
     text = re.sub(r"\s*```$", "", text)
     return text.strip()
 
@@ -689,10 +733,11 @@ class ClaudeClient:
             api_key=os.getenv("OPENROUTER_API_KEY"),
         )
         self.system_prompt = _SYSTEM_TEMPLATE.format(schema=schema_string)
+        self.dashboard_prompt = self.system_prompt + _DASHBOARD_SUFFIX
 
-    def _call(self, question: str, history: list[dict] = []) -> str:
+    def _call(self, question: str, history: list[dict] = [], system: str | None = None) -> str:
         messages = [
-            {"role": "system", "content": self.system_prompt},
+            {"role": "system", "content": system if system is not None else self.system_prompt},
             *[{"role": m["role"], "content": m["content"]} for m in history],
             {"role": "user", "content": question},
         ]
@@ -708,3 +753,8 @@ class ClaudeClient:
 
     def fix_sql(self, failed_sql: str, error: str) -> str:
         return self._call(_FIX_TEMPLATE.format(sql=failed_sql, error=error))
+
+    def generate_dashboard_spec(self, description: str) -> dict:
+        import json
+        raw = self._call(description, system=self.dashboard_prompt)
+        return json.loads(raw)
