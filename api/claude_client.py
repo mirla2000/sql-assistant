@@ -263,7 +263,15 @@ PayPal metrics always use solid_paypal_disputes only — never mix with card cha
   In fraud_final / chargebacks_final: 'adyen uae', 'adyen us (primer)', 'adyen us (solidgate)', 'checkout'
   In all_payments_prod: 'adyen', 'adyen_us', UUIDs for solidgate, 'checkout'
   When showing risk metrics by mid, use the mid column directly from the risk table (fraud_final or chargebacks_final).
-  For total_transactions denominator, group all_payments_prod separately without mid join.
+  For total_transactions denominator, map all_payments_prod MIDs to risk table MID names using this CASE:
+    CASE
+      WHEN mid = 'checkout'                                      THEN 'checkout'
+      WHEN mid = 'adyen'                                         THEN 'adyen uae'
+      WHEN mid = 'adyen_us'                                      THEN 'adyen us (primer)'
+      WHEN mid IN ('d4d7b345-bf19-453a-acdc-8ea68a5d4c44',
+                   '01KMFGBBW8RDNQJV20QPM8MMN')                  THEN 'adyen us (solidgate)'
+      ELSE mid  -- some UUIDs appear in both tables, keep as-is
+    END AS risk_mid
 
 TC15 FRAUD REASON CODES — only these count as fraudulent chargebacks:
   Visa:       reason_code_processed = '10.4'
