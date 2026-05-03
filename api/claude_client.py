@@ -866,6 +866,17 @@ SQL rules specific to dashboard mode:
 
 5. Generate 3-6 charts total. Each SQL must be self-contained and independently runnable.
    Add LIMIT 1000 to all SQL queries.
+
+6. MULTI-SERIES LINE CHARTS: when showing a metric over time broken down by a dimension (e.g. VAMP by MID,
+   spend by campaign), PIVOT to wide format — one column per dimension value, NOT one row per dimension.
+   ✅ Pivot pattern:
+     SELECT month,
+       MAX(CASE WHEN risk_mid = 'checkout' THEN vamp_rate END) AS checkout,
+       MAX(CASE WHEN risk_mid = 'adyen uae' THEN vamp_rate END) AS adyen_uae,
+       ...
+     FROM rates GROUP BY month ORDER BY month
+   Then set y: ["checkout", "adyen_uae", ...] — each becomes a separate line.
+   ❌ NEVER return long format (month, mid, value) for a line chart — all points merge into one line.
 """
 
 
