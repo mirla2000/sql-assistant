@@ -679,6 +679,7 @@ LEFT JOIN resolved r ON t.month = r.month
 ORDER BY t.month DESC
 LIMIT 500
 
+# CHAT MODE ONLY — In dashboard mode this question returns a JSON spec, not raw SQL.
 Q: Show Facebook adset performance for last 30 days: adset name, spend, subscriptions, CAC, avg LTV, ROI, upsell gain per sub, landing page views, start quiz rate, try-to-pays, conversion rate, FB try-to-pays, FB subs, FB CAC, plan breakdown, early cancellation rate
 SQL:
 WITH spend_data AS (
@@ -797,10 +798,13 @@ Please fix the SQL and return only the corrected query, no explanation.\
 
 _DASHBOARD_SUFFIX = """
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-DASHBOARD MODE — OUTPUT FORMAT
+DASHBOARD MODE — OVERRIDES ALL PREVIOUS INSTRUCTIONS
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Return ONLY a JSON object — no explanation, no markdown, no backticks.
-All SQL rules from above apply to every query in the spec.
+⚠️ CRITICAL: You are now in DASHBOARD MODE.
+All instructions above that say "Return ONLY the raw SQL query" are SUSPENDED.
+You MUST return ONLY a valid JSON object — never raw SQL, never explanation, never markdown.
+If you return anything other than a JSON object starting with {, it is WRONG.
+All SQL rules from above still apply to the SQL fields inside the JSON spec.
 
 JSON format:
 {
