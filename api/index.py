@@ -5,9 +5,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from dotenv import load_dotenv
 load_dotenv()
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from models import QueryRequest, QueryResponse, DashboardRequest, DashboardSpecResponse, ChartRunRequest, ChartRunResponse
+from models import QueryRequest, QueryResponse, DashboardRequest, ChartRunRequest, ChartRunResponse
 from bigquery_client import BigQueryClient
 from claude_client import ClaudeClient
 
@@ -57,11 +57,13 @@ async def get_schema():
     return {"schema": bq.schema_string}
 
 
-@app.post("/dashboard/spec", response_model=DashboardSpecResponse)
+@app.post("/dashboard/spec")
 async def dashboard_spec(request: DashboardRequest):
     _, claude = _get_clients()
-    spec = claude.generate_dashboard_spec(request.description)
-    return DashboardSpecResponse(**spec)
+    try:
+        return claude.generate_dashboard_spec(request.description)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/chart/run", response_model=ChartRunResponse)

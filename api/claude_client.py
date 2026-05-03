@@ -895,4 +895,13 @@ class ClaudeClient:
     def generate_dashboard_spec(self, description: str) -> dict:
         import json
         raw = self._call(description, system=self.dashboard_prompt)
-        return json.loads(raw)
+        # Try direct parse first
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            pass
+        # AI returned extra text — extract the first {...} block
+        match = re.search(r'\{.*\}', raw, re.DOTALL)
+        if match:
+            return json.loads(match.group())
+        raise ValueError(f"No JSON found in response: {raw[:300]}")
