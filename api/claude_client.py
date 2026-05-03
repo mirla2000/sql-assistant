@@ -58,9 +58,16 @@ hopeful-list-429812-f3.facebook_api.spend_by_age
   Key columns: date_start (DATE in Astana time = UTC+5), ad_id, ad_name, adset_id, adset_name,
                spend, impressions, inline_link_clicks, age ('18-24','25-34','35-44','45-54','55-64','65+')
   ⚠️ ALWAYS pre-aggregate into a CTE before joining with events (to collapse dates and avoid spend fan-out).
-  - Need totals by adset?        → GROUP BY adset_id, adset_name                (drop ad and age)
-  - Need totals by ad only?      → GROUP BY ad_id, ad_name, adset_name          (drop age)
-  - Need breakdown by ad + age?  → GROUP BY ad_id, ad_name, adset_name, age     (keep age)
+  ⚠️ adset_name changes over time — the same adset_id can appear with different adset_name values on different dates.
+     NEVER group by adset_id + adset_name together (produces duplicate rows and splits spend).
+     Always GROUP BY adset_id only, then use ANY_VALUE(adset_name) to get one name.
+     Example: SELECT adset_id, ANY_VALUE(adset_name) AS adset_name, SUM(spend) AS total_spend
+              FROM spend_by_age WHERE ... GROUP BY adset_id
+  ⚠️ adset_id and ad_id are INT64 (18-digit numbers). Always CAST to STRING when selecting as output columns:
+     CAST(adset_id AS STRING) AS adset_id — otherwise JavaScript loses precision on large integers.
+  - Need totals by adset?        → GROUP BY adset_id only, ANY_VALUE(adset_name)
+  - Need totals by ad?           → GROUP BY ad_id, adset_id, ANY_VALUE(ad_name), ANY_VALUE(adset_name)
+  - Need breakdown by ad + age?  → GROUP BY ad_id, adset_id, age
   Either way, collapse dates in the CTE first, then join the CTE to events.
   When joining to events: match on DATE(TIMESTAMP_ADD(f.timestamp, INTERVAL 300 MINUTE)) = s.date_start
   UTM join keys from funnel event_metadata:
