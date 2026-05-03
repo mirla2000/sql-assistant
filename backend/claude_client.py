@@ -235,40 +235,80 @@ hopeful-list-429812-f3.analytics_draft.ltv_ml_fast
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 RISK METRICS FORMULAS
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Use these exact formulas when asked about fraud rate, chargeback rate, VAMP, ECM, EFM, or PayPal rates.
-All joins to risk tables use: risk_table.order_id = all_payments_prod.order_id
-Filter card_brand using LOWER(): LOWER(p.card_brand) = 'visa'
+⚠️ CRITICAL: Risk metrics are NOT join-based. Each source is counted independently by its own date field.
+Do NOT join fraud_final/chargebacks_final to all_payments_prod on order_id for metric calculations.
+Count fraud by fraud_issue_date, chargebacks by dispute_issue_date, transactions by created_at — each separately.
+Card metrics (VAMP, ECM, EFM, fraud rate, chargeback rate) are SEPARATE from PayPal metrics.
+PayPal metrics always use solid_paypal_disputes only — never mix with card chargeback tables.
+
+TC15 FRAUD REASON CODES — only these count as fraudulent chargebacks:
+  Visa:       reason_code_processed = '10.4'
+  Mastercard: reason_code_processed = '4837'
+  Amex:       reason_code_processed = 'F29'
+  Discover:   reason_code_processed IN ('UA02', '7030', '03')
+  All other codes (consumer disputes, processing errors) are NOT fraudulent.
 
 FRAUD RATE (per card brand, current month):
-  SUM(f.fraud_amount_usd) / SUM(p.amount / 100)
-  Source: fraud_final f JOIN all_payments_prod p ON f.order_id = p.order_id
-  Filter: current month transactions
+  fraud_numerator   = SUM(fraud_amount_usd) FROM fraud_final
+                      WHERE DATE_TRUNC(fraud_issue_date, MONTH) = DATE_TRUNC(CURRENT_DATE(), MONTH)
+                        AND LOWER(card_brand) = 'visa'  -- or 'mastercard'
+  fraud_denominator = SUM(amount/100) FROM all_payments_prod
+                      WHERE status='settled'
+                        AND DATE_TRUNC(DATE(TIMESTAMP_MICROS(created_at)), MONTH) = DATE_TRUNC(CURRENT_DATE(), MONTH)
+                        AND LOWER(card_brand) = 'visa'
+  fraud_rate = fraud_numerator / fraud_denominator
 
 CHARGEBACK RATE (per card brand, current month):
-  COUNT(DISTINCT c.dispute_id WHERE c.status_processed != 'resolved') / COUNT(DISTINCT p.order_id)
-  Source: chargebacks_final c LEFT JOIN all_payments_prod p ON c.order_id = p.order_id
+  cb_numerator   = COUNT(*) FROM chargebacks_final
+                   WHERE status_processed != 'resolved'
+                     AND DATE_TRUNC(dispute_issue_date, MONTH) = DATE_TRUNC(CURRENT_DATE(), MONTH)
+                     AND LOWER(card_brand) = 'visa'
+  cb_denominator = COUNT(*) FROM all_payments_prod
+                   WHERE status='settled'
+                     AND DATE_TRUNC(DATE(TIMESTAMP_MICROS(created_at)), MONTH) = DATE_TRUNC(CURRENT_DATE(), MONTH)
+                     AND LOWER(card_brand) = 'visa'
+  chargeback_rate = cb_numerator / cb_denominator
 
-VAMP RATE (Visa only, current month — all values are COUNTS not amounts):
-  (TC40 + TC15 - resolved_chargebacks) / total_visa_transactions
-  TC40 = COUNT of fraud rows in fraud_final where LOWER(card_brand)='visa'
-  TC15 = COUNT of rows in chargebacks_final where LOWER(card_brand)='visa' AND reason is fraud-related
-  resolved_chargebacks = COUNT in chargebacks_final where LOWER(card_brand)='visa' AND status_processed='resolved'
-  total_visa_transactions = COUNT of settled Visa transactions in all_payments_prod
-  ⚠️ VAMP uses counts, NOT amounts. Do NOT use fraud_amount_usd here.
+VAMP RATE (Visa only, current month, ALL COUNTS — no amounts):
+  TC40 = COUNT(*) FROM fraud_final
+         WHERE LOWER(card_brand)='visa'
+           AND DATE_TRUNC(fraud_issue_date, MONTH) = DATE_TRUNC(CURRENT_DATE(), MONTH)
+  TC15 = COUNT(*) FROM chargebacks_final
+         WHERE LOWER(card_brand)='visa'
+           AND DATE_TRUNC(dispute_issue_date, MONTH) = DATE_TRUNC(CURRENT_DATE(), MONTH)
+           AND reason_code_processed = '10.4'   ← Visa fraud code only
+  resolved = COUNT(*) FROM chargebacks_final
+             WHERE LOWER(card_brand)='visa'
+               AND DATE_TRUNC(dispute_issue_date, MONTH) = DATE_TRUNC(CURRENT_DATE(), MONTH)
+               AND status_processed = 'resolved'
+  total_visa = COUNT(*) FROM all_payments_prod
+               WHERE LOWER(card_brand)='visa' AND status='settled'
+                 AND DATE_TRUNC(DATE(TIMESTAMP_MICROS(created_at)), MONTH) = DATE_TRUNC(CURRENT_DATE(), MONTH)
+  vamp_rate = (TC40 + TC15 - resolved) / total_visa
 
-ECM — Excessive Chargeback Program (Mastercard only, PREVIOUS month):
-  COUNT(chargebacks not resolved, Mastercard) / COUNT(all Mastercard transactions)
+ECM — Mastercard only, PREVIOUS month (not current):
+  COUNT(chargebacks with status_processed != 'resolved', Mastercard, prev month)
+  / COUNT(settled Mastercard transactions, prev month)
+  prev month: DATE_TRUNC(DATE_SUB(CURRENT_DATE(), INTERVAL 1 MONTH), MONTH)
 
-EFM — Excessive Fraud Merchant (Mastercard only, PREVIOUS month):
-  COUNT(fraudulent chargebacks, Mastercard) / COUNT(all Mastercard transactions)
+EFM — Mastercard only, PREVIOUS month:
+  COUNT(chargebacks where reason_code_processed='4837', Mastercard, prev month)
+  / COUNT(settled Mastercard transactions, prev month)
 
-PAYPAL CLAIM RATE (previous 3 calendar months):
-  SUM(dispute_amount where channel=INTERNAL and stage IN CHARGEBACK/PRE_ARBITRATION/ARBITRATION)
-  / SUM(all PayPal sales amount)
-  Source: solid_paypal_disputes
+PAYPAL CLAIM RATE (previous 3 calendar months, amounts not counts):
+  SUM(dispute_amount) WHERE dispute_channel='INTERNAL'
+    AND dispute_life_cycle_stage IN ('CHARGEBACK','PRE_ARBITRATION','ARBITRATION')
+  / SUM(all PayPal sales amount from all_payments_prod where payment_method IN ('paypal','paypal-vault'))
+  Date scope: 3 full calendar months before current month
 
 PAYPAL DISPUTE RATE (previous 3 calendar months):
-  SUM(dispute_amount where channel=INTERNAL and stage=INQUIRY) / SUM(all PayPal sales)
+  SUM(dispute_amount) WHERE dispute_channel='INTERNAL' AND dispute_life_cycle_stage='INQUIRY'
+  / SUM(all PayPal sales)
+
+PAYPAL EXTERNAL CHARGEBACK RATE (current month, counts):
+  COUNT(*) WHERE dispute_channel='EXTERNAL'
+    AND dispute_life_cycle_stage IN ('CHARGEBACK','PRE_ARBITRATION','ARBITRATION')
+  / COUNT(all PayPal sales transactions)
 
 Additional schema from BigQuery:
 {schema}
