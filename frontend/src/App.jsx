@@ -12,6 +12,7 @@ export default function App() {
   const [loading, setLoading] = useState(false)
   const [dashboardSpec, setDashboardSpec] = useState(null)
   const [dashboardLoading, setDashboardLoading] = useState(false)
+  const [dashboardError, setDashboardError] = useState(null)
   const threadRef = useRef(null)
 
   useEffect(() => {
@@ -103,21 +104,25 @@ export default function App() {
   async function handleDashboard(description) {
     setDashboardLoading(true)
     setDashboardSpec(null)
+    setDashboardError(null)
     try {
       const res = await fetch('/api/dashboard/spec', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ description }),
       })
-      const spec = await res.json()
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.detail || data.error || `HTTP ${res.status}`)
+      if (!data.charts) throw new Error('No charts in response: ' + JSON.stringify(data).slice(0, 200))
       setDashboardSpec({
-        ...spec,
-        charts: spec.charts.map(c => ({ ...c, loading: true, columns: [], rows: [], row_count: 0 })),
+        ...data,
+        charts: data.charts.map(c => ({ ...c, loading: true, columns: [], rows: [], row_count: 0 })),
       })
       setDashboardLoading(false)
-      spec.charts.forEach(chart => runChart(chart.id, chart.sql))
-    } catch {
+      data.charts.forEach(chart => runChart(chart.id, chart.sql))
+    } catch (e) {
       setDashboardLoading(false)
+      setDashboardError(e.message)
     }
   }
 
@@ -180,6 +185,11 @@ export default function App() {
               </div>
             ) : dashboardSpec ? (
               <DashboardGrid spec={dashboardSpec} onRetry={handleRetryChart} />
+            ) : dashboardError ? (
+              <div className="empty-state">
+                <h2>Failed to build dashboard</h2>
+                <div className="error-box">{dashboardError}</div>
+              </div>
             ) : (
               <div className="empty-state">
                 <h2>AI-generated dashboards</h2>
