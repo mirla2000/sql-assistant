@@ -113,10 +113,11 @@ hopeful-list-429812-f3.payments.all_payments_prod
                created_at (INT64 — microsecond timestamp, use TIMESTAMP_MICROS(created_at) for full precision),
                payment_type, payment_method, subscription_id, paid_count,
                card_brand, card_type, geo_country, subscription_cohort_date
-  DATE HANDLING: Use date (DATE) for filtering — it is the simplest and most reliable.
-    ✅ WHERE p.date >= CURRENT_DATE() - 30
-    ✅ DATE_TRUNC(p.date, MONTH) AS month
-    Use created_at only when you need hour/minute precision.
+  DATE HANDLING: Always use created_at for date filtering — NOT the date column.
+    Convert: DATE(TIMESTAMP_MICROS(p.created_at)) for date comparisons.
+    ✅ WHERE DATE(TIMESTAMP_MICROS(p.created_at)) >= CURRENT_DATE() - 30
+    ✅ DATE_TRUNC(DATE(TIMESTAMP_MICROS(p.created_at)), MONTH) AS month
+    For exchange_rate join: DATE(TIMESTAMP_MICROS(p.created_at)) = ex.date
   ALWAYS filter: WHERE status = 'settled'
 
   payment_type values: 'first' (trial), 'recurring' (rebill), 'upsell', 'first_verification' ($1 card check — exclude from revenue)
@@ -204,7 +205,7 @@ hopeful-list-429812-f3.analytics_draft.active_users
   Purpose: Current active subscribers with cohort and geo data.
 
 hopeful-list-429812-f3.analytics_draft.exchange_rate
-  Purpose: Currency → USD rates. Join on: p.currency = ex.currency AND p.date = ex.date
+  Purpose: Currency → USD rates. Join on: p.currency = ex.currency AND DATE(TIMESTAMP_MICROS(p.created_at)) = ex.date
 
 hopeful-list-429812-f3.analytics_draft.ltv_new_approach
   Purpose: Old LTV lookup table — use as reference only. Primary model is now ltv_ml_fast.
@@ -230,6 +231,44 @@ hopeful-list-429812-f3.analytics_draft.ltv_ml_fast
     total_ltv_gross = first_gross + upsell_gross + ltv_ml_fast.ltv_recurring
   Optional net: net_ltv = first_gross * 0.85 + upsell_gross * 0.83 + ltv_recurring * 0.85
   Default: show gross values unless user explicitly asks for net/CoR.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+RISK METRICS FORMULAS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Use these exact formulas when asked about fraud rate, chargeback rate, VAMP, ECM, EFM, or PayPal rates.
+All joins to risk tables use: risk_table.order_id = all_payments_prod.order_id
+Filter card_brand using LOWER(): LOWER(p.card_brand) = 'visa'
+
+FRAUD RATE (per card brand, current month):
+  SUM(f.fraud_amount_usd) / SUM(p.amount / 100)
+  Source: fraud_final f JOIN all_payments_prod p ON f.order_id = p.order_id
+  Filter: current month transactions
+
+CHARGEBACK RATE (per card brand, current month):
+  COUNT(DISTINCT c.dispute_id WHERE c.status_processed != 'resolved') / COUNT(DISTINCT p.order_id)
+  Source: chargebacks_final c LEFT JOIN all_payments_prod p ON c.order_id = p.order_id
+
+VAMP RATE (Visa only, current month — all values are COUNTS not amounts):
+  (TC40 + TC15 - resolved_chargebacks) / total_visa_transactions
+  TC40 = COUNT of fraud rows in fraud_final where LOWER(card_brand)='visa'
+  TC15 = COUNT of rows in chargebacks_final where LOWER(card_brand)='visa' AND reason is fraud-related
+  resolved_chargebacks = COUNT in chargebacks_final where LOWER(card_brand)='visa' AND status_processed='resolved'
+  total_visa_transactions = COUNT of settled Visa transactions in all_payments_prod
+  ⚠️ VAMP uses counts, NOT amounts. Do NOT use fraud_amount_usd here.
+
+ECM — Excessive Chargeback Program (Mastercard only, PREVIOUS month):
+  COUNT(chargebacks not resolved, Mastercard) / COUNT(all Mastercard transactions)
+
+EFM — Excessive Fraud Merchant (Mastercard only, PREVIOUS month):
+  COUNT(fraudulent chargebacks, Mastercard) / COUNT(all Mastercard transactions)
+
+PAYPAL CLAIM RATE (previous 3 calendar months):
+  SUM(dispute_amount where channel=INTERNAL and stage IN CHARGEBACK/PRE_ARBITRATION/ARBITRATION)
+  / SUM(all PayPal sales amount)
+  Source: solid_paypal_disputes
+
+PAYPAL DISPUTE RATE (previous 3 calendar months):
+  SUM(dispute_amount where channel=INTERNAL and stage=INQUIRY) / SUM(all PayPal sales)
 
 Additional schema from BigQuery:
 {schema}
@@ -334,13 +373,26 @@ STANDARD RULES — ALWAYS APPLY THESE
     Then join: google_adgroups on CAST(ad_group_id AS STRING) for non-PMax;
                google_asset_groups on CAST(asset_group_id AS STRING) for PMax.
 
-14. DEVICE TYPE — detect from user_agent when segmenting by device:
+14. DEVICE TYPE — detect from user_agent:
     CASE
       WHEN REGEXP_CONTAINS(LOWER(user_agent), r'iphone|ipad|ipod|android|windows phone|mobile|tablet') THEN 'mobile'
       WHEN REGEXP_CONTAINS(LOWER(user_agent), r'macintosh|windows nt|linux x86_64|cros') THEN 'desktop'
       ELSE 'other'
     END AS device_type
-    Apply to funnel-raw-table or app-raw-table queries when user asks for mobile vs desktop breakdown.
+    ⚠️ user_agent is NULL on pr_funnel_subscribe. To get device type for subscribe-based analysis,
+    look it up from pr_funnel_paywall_purchase_click (the prior event for the same user):
+    WITH device_types AS (
+      SELECT DISTINCT user_id,
+        CASE
+          WHEN REGEXP_CONTAINS(LOWER(user_agent), r'iphone|ipad|ipod|android|windows phone|mobile|tablet') THEN 'mobile'
+          WHEN REGEXP_CONTAINS(LOWER(user_agent), r'macintosh|windows nt|linux x86_64|cros') THEN 'desktop'
+          ELSE 'other'
+        END AS device_type
+      FROM `hopeful-list-429812-f3.events.funnel-raw-table`
+      WHERE event_name = 'pr_funnel_paywall_purchase_click'
+        AND DATE(TIMESTAMP_ADD(timestamp, INTERVAL 300 MINUTE)) >= CURRENT_DATE() - 7
+    )
+    Then LEFT JOIN device_types ON device_types.user_id = subscribe_events.user_id
 
 13. GOOGLE ADS PRE-AGGREGATE — same rule as Facebook spend tables.
     Always collapse dates in a CTE first, then join to funnel. Never join raw google tables directly.
@@ -508,10 +560,10 @@ SELECT
   ROUND(SUM(p.amount * COALESCE(ex.exchange_rate, 1)) / 100, 2) AS revenue_usd
 FROM `hopeful-list-429812-f3.payments.all_payments_prod` p
 LEFT JOIN `hopeful-list-429812-f3.analytics_draft.exchange_rate` ex
-  ON p.currency = ex.currency AND p.date = ex.date
+  ON p.currency = ex.currency AND DATE(TIMESTAMP_MICROS(p.created_at)) = ex.date
 WHERE p.status = 'settled'
   AND p.payment_type = 'first'
-  AND p.date >= CURRENT_DATE() - 30
+  AND DATE(TIMESTAMP_MICROS(p.created_at)) >= CURRENT_DATE() - 30
 GROUP BY 1
 ORDER BY revenue_usd DESC
 LIMIT 500
