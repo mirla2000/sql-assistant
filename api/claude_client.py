@@ -678,6 +678,108 @@ LEFT JOIN tc15 c ON t.month = c.month
 LEFT JOIN resolved r ON t.month = r.month
 ORDER BY t.month DESC
 LIMIT 500
+
+Q: Show Facebook adset performance for last 30 days: adset name, spend, subscriptions, CAC, avg LTV, ROI, upsell gain per sub, landing page views, start quiz rate, try-to-pays, conversion rate, FB try-to-pays, FB subs, FB CAC, plan breakdown, early cancellation rate
+SQL:
+WITH spend_data AS (
+  SELECT
+    CAST(adset_id AS STRING) AS adset_id,
+    ARRAY_AGG(adset_name ORDER BY date_start DESC LIMIT 1)[OFFSET(0)] AS adset_name,
+    SUM(spend) AS total_spend,
+    SUM(pixel_initiate_checkout) AS fb_ttp,
+    SUM(pixel_purchases) AS fb_subs
+  FROM `hopeful-list-429812-f3.facebook_api.spend_by_age`
+  WHERE date_start >= CURRENT_DATE() - 30
+  GROUP BY adset_id
+),
+funnel_events AS (
+  SELECT
+    JSON_VALUE(event_metadata, '$.utm_adset') AS utm_adset,
+    COUNT(DISTINCT CASE WHEN event_name = 'pr_funnel_landing_page_view' THEN device_id END) AS lp_views,
+    COUNT(DISTINCT CASE WHEN event_name = 'pr_funnel_click' THEN device_id END) AS start_quiz,
+    COUNT(DISTINCT CASE WHEN event_name = 'pr_funnel_paywall_purchase_click' THEN user_id END) AS ttp_count,
+    COUNT(DISTINCT CASE WHEN event_name = 'pr_funnel_subscribe' THEN user_id END) AS subs,
+    COUNT(DISTINCT CASE WHEN event_name = 'pr_funnel_subscribe' AND JSON_VALUE(event_metadata, '$.subscription') = '1Week' THEN user_id END) AS subs_1w,
+    COUNT(DISTINCT CASE WHEN event_name = 'pr_funnel_subscribe' AND JSON_VALUE(event_metadata, '$.subscription') = '4Week' THEN user_id END) AS subs_4w,
+    COUNT(DISTINCT CASE WHEN event_name = 'pr_funnel_subscribe' AND JSON_VALUE(event_metadata, '$.subscription') = '12Week' THEN user_id END) AS subs_12w
+  FROM `hopeful-list-429812-f3.events.funnel-raw-table`
+  WHERE DATE(TIMESTAMP_ADD(timestamp, INTERVAL 300 MINUTE)) >= CURRENT_DATE() - 30
+    AND ip NOT LIKE '173.252%' AND ip NOT LIKE '69.171%' AND ip NOT LIKE '66.220%' AND ip NOT LIKE '31.13%'
+    AND (user_agent NOT LIKE '%AdsBot%' OR user_agent IS NULL)
+    AND (user_agent NOT LIKE '%facebookexternalhit%' OR user_agent IS NULL)
+    AND (user_agent NOT LIKE '%Google-Read-Aloud%' OR user_agent IS NULL)
+  GROUP BY 1
+),
+user_ltv AS (
+  SELECT
+    JSON_VALUE(f.event_metadata, '$.utm_adset') AS utm_adset,
+    AVG(COALESCE(l.ltv, 0)) AS avg_ltv,
+    SUM(COALESCE(l.ltv, 0)) AS total_ltv
+  FROM `hopeful-list-429812-f3.events.funnel-raw-table` f
+  LEFT JOIN `hopeful-list-429812-f3.analytics_draft.ltv_ml_fast` l ON f.user_id = l.customer_account_id
+  WHERE f.event_name = 'pr_funnel_subscribe'
+    AND DATE(TIMESTAMP_ADD(f.timestamp, INTERVAL 300 MINUTE)) >= CURRENT_DATE() - 30
+    AND f.ip NOT LIKE '173.252%' AND f.ip NOT LIKE '69.171%' AND f.ip NOT LIKE '66.220%' AND f.ip NOT LIKE '31.13%'
+    AND (f.user_agent NOT LIKE '%AdsBot%' OR f.user_agent IS NULL)
+    AND (f.user_agent NOT LIKE '%facebookexternalhit%' OR f.user_agent IS NULL)
+  GROUP BY 1
+),
+upsell_data AS (
+  SELECT
+    JSON_VALUE(f.event_metadata, '$.utm_adset') AS utm_adset,
+    SUM(p.amount) / 100 AS total_upsell
+  FROM `hopeful-list-429812-f3.events.funnel-raw-table` f
+  JOIN `hopeful-list-429812-f3.payments.all_payments_prod` p
+    ON f.user_id = p.customer_account_id AND p.payment_type = 'upsell' AND p.status = 'settled'
+  WHERE f.event_name = 'pr_funnel_subscribe'
+    AND DATE(TIMESTAMP_ADD(f.timestamp, INTERVAL 300 MINUTE)) >= CURRENT_DATE() - 30
+    AND f.ip NOT LIKE '173.252%' AND f.ip NOT LIKE '69.171%'
+    AND (f.user_agent NOT LIKE '%AdsBot%' OR f.user_agent IS NULL)
+    AND (f.user_agent NOT LIKE '%facebookexternalhit%' OR f.user_agent IS NULL)
+  GROUP BY 1
+),
+early_churn AS (
+  SELECT
+    JSON_VALUE(f.event_metadata, '$.utm_adset') AS utm_adset,
+    COUNT(DISTINCT CASE WHEN TIMESTAMP_DIFF(a.timestamp, f.timestamp, HOUR) < 12 THEN f.user_id END) AS churn_12h
+  FROM `hopeful-list-429812-f3.events.funnel-raw-table` f
+  JOIN `hopeful-list-429812-f3.events.app-raw-table` a ON f.user_id = a.user_id
+  WHERE f.event_name = 'pr_funnel_subscribe'
+    AND a.event_name = 'pr_webapp_unsubscribed'
+    AND DATE(TIMESTAMP_ADD(f.timestamp, INTERVAL 300 MINUTE)) >= CURRENT_DATE() - 30
+    AND f.ip NOT LIKE '173.252%' AND f.ip NOT LIKE '69.171%'
+    AND (f.user_agent NOT LIKE '%AdsBot%' OR f.user_agent IS NULL)
+    AND (f.user_agent NOT LIKE '%facebookexternalhit%' OR f.user_agent IS NULL)
+  GROUP BY 1
+)
+SELECT
+  s.adset_id,
+  s.adset_name,
+  ROUND(s.total_spend, 2) AS spend,
+  COALESCE(f.subs, 0) AS subscriptions,
+  ROUND(SAFE_DIVIDE(s.total_spend, f.subs), 2) AS cac,
+  ROUND(COALESCE(l.avg_ltv, 0), 2) AS avg_ltv,
+  ROUND(SAFE_DIVIDE(u.total_upsell, f.subs), 2) AS avg_upsell_per_sub,
+  ROUND(SAFE_DIVIDE(l.total_ltv - s.total_spend, s.total_spend) * 100, 2) AS roi_pct,
+  COALESCE(f.lp_views, 0) AS landing_page_views,
+  ROUND(SAFE_DIVIDE(f.start_quiz, f.lp_views) * 100, 2) AS start_quiz_rate,
+  COALESCE(f.ttp_count, 0) AS try_to_pay_count,
+  ROUND(SAFE_DIVIDE(f.subs, f.lp_views) * 100, 4) AS conversion_rate,
+  COALESCE(s.fb_ttp, 0) AS fb_try_to_pays,
+  COALESCE(s.fb_subs, 0) AS fb_subscriptions,
+  ROUND(SAFE_DIVIDE(s.total_spend, s.fb_subs), 2) AS fb_cac,
+  ROUND(SAFE_DIVIDE(s.total_spend, f.lp_views), 4) AS cost_per_lp_view,
+  ROUND(SAFE_DIVIDE(f.subs_1w, f.subs) * 100, 2) AS share_1w_pct,
+  ROUND(SAFE_DIVIDE(f.subs_4w, f.subs) * 100, 2) AS share_4w_pct,
+  ROUND(SAFE_DIVIDE(f.subs_12w, f.subs) * 100, 2) AS share_12w_pct,
+  ROUND(SAFE_DIVIDE(ec.churn_12h, f.subs) * 100, 2) AS early_cancel_rate_pct
+FROM spend_data s
+LEFT JOIN funnel_events f ON s.adset_id = f.utm_adset
+LEFT JOIN user_ltv l ON s.adset_id = l.utm_adset
+LEFT JOIN upsell_data u ON s.adset_id = u.utm_adset
+LEFT JOIN early_churn ec ON s.adset_id = ec.utm_adset
+ORDER BY s.total_spend DESC
+LIMIT 500
 """
 
 _FIX_TEMPLATE = """\
