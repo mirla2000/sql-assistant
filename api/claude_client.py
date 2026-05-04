@@ -1269,7 +1269,7 @@ class ClaudeClient:
         self.system_prompt = _SYSTEM_TEMPLATE.format(schema=schema_string)
         self.dashboard_prompt = self.system_prompt + _DASHBOARD_SUFFIX
 
-    def _call(self, question: str, history: list[dict] = [], system: str | None = None) -> str:
+    def _call(self, question: str, history: list[dict] = [], system: str | None = None, max_tokens: int = 4096) -> str:
         messages = [
             {"role": "system", "content": system if system is not None else self.system_prompt},
             *[{"role": m["role"], "content": m["content"]} for m in history],
@@ -1279,7 +1279,7 @@ class ClaudeClient:
             model="anthropic/claude-haiku-4-5",
             messages=messages,
             temperature=0.0,
-            max_tokens=4096,
+            max_tokens=max_tokens,
         )
         return _clean_sql(response.choices[0].message.content)
 
@@ -1291,7 +1291,8 @@ class ClaudeClient:
 
     def generate_dashboard_spec(self, description: str) -> dict:
         import json
-        raw = self._call(description, system=self.dashboard_prompt)
+        # Dashboard spec contains 4-6 full SQL queries in JSON — needs more room than a single query
+        raw = self._call(description, system=self.dashboard_prompt, max_tokens=8192)
         # Try direct parse first
         try:
             return json.loads(raw)
