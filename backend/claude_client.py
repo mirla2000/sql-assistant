@@ -339,6 +339,31 @@ VAMP RATE (Visa only, current month, ALL COUNTS — no amounts):
                  AND DATE_TRUNC(DATE(TIMESTAMP_MICROS(created_at)), MONTH) = DATE_TRUNC(CURRENT_DATE(), MONTH)
   vamp_rate = (TC40 + TC15 - resolved) / total_visa
 
+  ⚠️ VAMP BY MID — CRITICAL JOIN RULE:
+  Risk tables (fraud_final, chargebacks_final) use risk MID names: 'adyen uae', 'adyen us (primer)', etc.
+  all_payments_prod uses raw MID values: 'adyen', 'adyen_us', UUIDs.
+  When computing VAMP by MID, you MUST apply the MID mapping CASE inside the total_txn CTE so both
+  sides of the join use the same naming. NEVER join on raw mid — it will only match 'checkout'.
+  Correct pattern for total_txn when breaking down by MID:
+    total_txn AS (
+      SELECT DATE_TRUNC(DATE(TIMESTAMP_MICROS(created_at)), MONTH) AS month,
+        CASE
+          WHEN mid = 'checkout'                                       THEN 'checkout'
+          WHEN mid = 'adyen'                                          THEN 'adyen uae'
+          WHEN mid = 'adyen_us'                                       THEN 'adyen us (primer)'
+          WHEN mid IN ('d4d7b345-bf19-453a-acdc-8ea68a5d4c44',
+                       '01KMFGBBWW8RDNQJV20QPM8MMN')                 THEN 'adyen us (solidgate)'
+          ELSE mid
+        END AS risk_mid,
+        COUNT(*) AS cnt
+      FROM `hopeful-list-429812-f3.payments.all_payments_prod`
+      WHERE LOWER(card_brand) = 'visa' AND status = 'settled' AND ...
+      GROUP BY 1, 2
+    )
+  Then join: LEFT JOIN tc40 f ON t.month = f.month AND t.risk_mid = f.mid
+  Then pivot: MAX(CASE WHEN risk_mid = 'checkout' THEN vamp_rate END) AS checkout,
+              MAX(CASE WHEN risk_mid = 'adyen uae' THEN vamp_rate END) AS adyen_uae, ...
+
 ECM — Mastercard only, PREVIOUS month (not current):
   COUNT(chargebacks with status_processed != 'resolved', Mastercard, prev month)
   / COUNT(settled Mastercard transactions, prev month)
@@ -1256,10 +1281,16 @@ SQL rules specific to dashboard mode:
      SELECT month,
        MAX(CASE WHEN risk_mid = 'checkout' THEN vamp_rate END) AS checkout,
        MAX(CASE WHEN risk_mid = 'adyen uae' THEN vamp_rate END) AS adyen_uae,
-       ...
+       MAX(CASE WHEN risk_mid = 'adyen us (primer)' THEN vamp_rate END) AS adyen_us_primer,
+       MAX(CASE WHEN risk_mid = 'adyen us (solidgate)' THEN vamp_rate END) AS adyen_us_solidgate
      FROM rates GROUP BY month ORDER BY month
-   Then set y: ["checkout", "adyen_uae", ...] — each becomes a separate line.
+   Then set y: ["checkout", "adyen_uae", "adyen_us_primer", "adyen_us_solidgate"] — each becomes a separate line.
    ❌ NEVER return long format (month, mid, value) for a line chart — all points merge into one line.
+
+   ⚠️ VAMP BY MID SPECIFICALLY: the transaction denominator (all_payments_prod) uses raw mid names
+   ('adyen', 'adyen_us', UUIDs) but risk tables use mapped names ('adyen uae', 'adyen us (primer)', etc.).
+   You MUST apply the MID CASE mapping inside the total_txn CTE and join on risk_mid. See VAMP BY MID
+   rule in the RISK METRICS section. Joining on raw mid will only match 'checkout' and zero out all others.
 """
 
 
