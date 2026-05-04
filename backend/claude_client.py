@@ -213,9 +213,10 @@ hopeful-list-429812-f3.analytics_draft.chargebacks_final
 
 hopeful-list-429812-f3.analytics_draft.solid_paypal_disputes
   Purpose: PayPal disputes only (separate from card chargebacks).
-  Key columns: dispute_id, order_id, customer_account_id, dispute_amount (INT64), dispute_currency,
-               dispute_outcome, status, dispute_life_cycle_stage, dispute_channel,
+  Key columns: dispute_id, order_id, customer_account_id, dispute_amount (INT64 — IN CENTS, divide by 100),
+               dispute_currency, dispute_outcome, status, dispute_life_cycle_stage, dispute_channel,
                dispute_create_time (TIMESTAMP), dispute_modified_time (TIMESTAMP)
+  ⚠️ dispute_amount is in cents (same as all_payments_prod.amount). Always divide by 100 for USD.
   Dispute type classification:
     Internal inquiry:    dispute_channel='INTERNAL' AND dispute_life_cycle_stage='INQUIRY'
     Claim:               dispute_channel='INTERNAL' AND dispute_life_cycle_stage IN ('CHARGEBACK','PRE_ARBITRATION','ARBITRATION')
@@ -343,19 +344,23 @@ EFM — Mastercard only, PREVIOUS month:
   / COUNT(settled Mastercard transactions, prev month)
 
 PAYPAL CLAIM RATE (previous 3 calendar months, amounts not counts):
-  SUM(dispute_amount) WHERE dispute_channel='INTERNAL'
+  SUM(dispute_amount / 100) WHERE dispute_channel='INTERNAL'
     AND dispute_life_cycle_stage IN ('CHARGEBACK','PRE_ARBITRATION','ARBITRATION')
-  / SUM(all PayPal sales amount from all_payments_prod where payment_method IN ('paypal','paypal-vault'))
-  Date scope: 3 full calendar months before current month
+  / SUM(amount / 100) from all_payments_prod where payment_method IN ('paypal','paypal-vault')
+  ⚠️ Date scope: the 3 full months BEFORE the current/target month (do NOT include the current month).
+     Example: if target = April 2026 → scope = January, February, March 2026.
+     Filter: DATE_TRUNC(date_col, MONTH) >= DATE_TRUNC(DATE_SUB(<target_month>, INTERVAL 3 MONTH), MONTH)
+             AND DATE_TRUNC(date_col, MONTH) < DATE_TRUNC(<target_month>, MONTH)
 
-PAYPAL DISPUTE RATE (previous 3 calendar months):
-  SUM(dispute_amount) WHERE dispute_channel='INTERNAL' AND dispute_life_cycle_stage='INQUIRY'
-  / SUM(all PayPal sales)
+PAYPAL DISPUTE RATE (previous 3 calendar months, same date scope as claim rate):
+  SUM(dispute_amount / 100) WHERE dispute_channel='INTERNAL' AND dispute_life_cycle_stage='INQUIRY'
+  / SUM(amount / 100) from all_payments_prod PayPal sales (same 3-month window)
 
-PAYPAL EXTERNAL CHARGEBACK RATE (current month, counts):
+PAYPAL EXTERNAL CHARGEBACK RATE (current/target month only, counts):
   COUNT(*) WHERE dispute_channel='EXTERNAL'
     AND dispute_life_cycle_stage IN ('CHARGEBACK','PRE_ARBITRATION','ARBITRATION')
-  / COUNT(all PayPal sales transactions)
+    AND DATE_TRUNC(date_col, MONTH) = <target_month>
+  / COUNT(*) settled PayPal transactions in the same month
 
 Additional schema from BigQuery:
 {schema}
