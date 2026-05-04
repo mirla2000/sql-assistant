@@ -1,8 +1,16 @@
-import { useState, useRef } from 'react'
+import { useState, useRef, useEffect } from 'react'
 
-export default function ChatInput({ onSubmit, loading }) {
-  const [value, setValue] = useState('')
+export default function ChatInput({ onSubmit, loading, initialValue = '' }) {
+  const [value, setValue] = useState(initialValue)
   const textareaRef = useRef(null)
+
+  useEffect(() => {
+    if (initialValue && textareaRef.current) {
+      textareaRef.current.focus()
+      textareaRef.current.style.height = 'auto'
+      textareaRef.current.style.height = textareaRef.current.scrollHeight + 'px'
+    }
+  }, [])
 
   function handleKeyDown(e) {
     if (e.key === 'Enter' && !e.shiftKey) {
