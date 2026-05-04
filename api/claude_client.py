@@ -27,6 +27,12 @@ hopeful-list-429812-f3.events.funnel-raw-table
   Filter by event_name to get specific funnel steps:
     pr_funnel_landing_page_view      — user visited landing page (use device_id as user identifier, user_id is NULL here)
     pr_funnel_click                  — user answered a quiz question (user_id is NULL here — use device_id)
+                                       ⚠️ This fires for EVERY quiz question. Always deduplicate to ONE row per device_id
+                                       using MIN(timestamp) — this represents "started quiz".
+                                       NEVER include all individual quiz clicks in a funnel query unless the user
+                                       explicitly asks for per-question drop-off analysis.
+                                       Pattern: WITH quiz_start AS (SELECT device_id, MIN(timestamp) AS ts
+                                                FROM funnel-raw-table WHERE event_name='pr_funnel_click' GROUP BY 1)
     pr_funnel_email_page_view        — user reached email capture page (use device_id)
     pr_funnel_email_submit           — user submitted their email (BOTH device_id AND user_id available here)
     pr_funnel_selling_page_view      — user saw selling/upsell page
