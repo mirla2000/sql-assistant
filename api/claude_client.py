@@ -434,9 +434,10 @@ STANDARD RULES — ALWAYS APPLY THESE
     misleading 100% rates. If user explicitly wants minimum sample size, add:
       HAVING COUNT(DISTINCT qa.device_id) >= 50
 
-    AGE LOOKUP FOR USER-LEVEL QUERIES: age is only available on pr_funnel_click with key_value='age'.
-    Do NOT read $.age from other funnel events — it is NULL or stale there.
-    Always use a separate CTE joined on device_id:
+    AGE LOOKUP FOR USER-LEVEL QUERIES: $.age in event_metadata is populated only AFTER the user
+    answers the age question in the quiz. It is NULL on events before the age question
+    (landing_page_view, early quiz clicks). It IS available on later events (paywall_view, subscribe).
+    For consistent age across ALL funnel rows, use a separate CTE from the quiz click joined on device_id:
       age_data AS (
         SELECT device_id, MAX(JSON_VALUE(event_metadata, '$.question_answer')) AS age
         FROM `hopeful-list-429812-f3.events.funnel-raw-table`
@@ -445,6 +446,7 @@ STANDARD RULES — ALWAYS APPLY THESE
         GROUP BY 1
       )
       -- then: LEFT JOIN age_data ag ON e.device_id = ag.device_id
+      -- Use ag.age for all rows — it fills in age even for early funnel events where $.age is NULL.
 
     LANGUAGE LOOKUP: $.language is not available on pr_funnel_subscribe.
     Look it up from pr_funnel_email_submit or pr_funnel_paywall_purchase_click via user_id:
