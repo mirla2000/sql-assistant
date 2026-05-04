@@ -434,6 +434,29 @@ STANDARD RULES — ALWAYS APPLY THESE
     misleading 100% rates. If user explicitly wants minimum sample size, add:
       HAVING COUNT(DISTINCT qa.device_id) >= 50
 
+    AGE LOOKUP FOR USER-LEVEL QUERIES: age is only available on pr_funnel_click with key_value='age'.
+    Do NOT read $.age from other funnel events — it is NULL or stale there.
+    Always use a separate CTE joined on device_id:
+      age_data AS (
+        SELECT device_id, MAX(JSON_VALUE(event_metadata, '$.question_answer')) AS age
+        FROM `hopeful-list-429812-f3.events.funnel-raw-table`
+        WHERE event_name = 'pr_funnel_click'
+          AND JSON_VALUE(event_metadata, '$.key_value') = 'age'
+        GROUP BY 1
+      )
+      -- then: LEFT JOIN age_data ag ON e.device_id = ag.device_id
+
+    LANGUAGE LOOKUP: $.language is not available on pr_funnel_subscribe.
+    Look it up from pr_funnel_email_submit or pr_funnel_paywall_purchase_click via user_id:
+      language_data AS (
+        SELECT user_id, MAX(JSON_VALUE(event_metadata, '$.language')) AS language
+        FROM `hopeful-list-429812-f3.events.funnel-raw-table`
+        WHERE event_name IN ('pr_funnel_email_submit', 'pr_funnel_paywall_purchase_click')
+          AND user_id IS NOT NULL
+        GROUP BY 1
+      )
+      -- then: LEFT JOIN language_data lang ON e.user_id = lang.user_id
+
 11. GOOGLE ADS COST — cost_micros / 1,000,000 = USD. This is different from payments.amount (÷100).
     ✅ SUM(cost_micros) / 1000000 AS spend_usd
     ❌ SUM(cost_micros) / 100
