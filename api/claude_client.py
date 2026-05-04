@@ -450,10 +450,17 @@ STANDARD RULES — ALWAYS APPLY THESE
     misleading 100% rates. If user explicitly wants minimum sample size, add:
       HAVING COUNT(DISTINCT qa.device_id) >= 50
 
-    AGE LOOKUP FOR USER-LEVEL QUERIES: $.age in event_metadata is populated only AFTER the user
-    answers the age question in the quiz. It is NULL on events before the age question
-    (landing_page_view, early quiz clicks). It IS available on later events (paywall_view, subscribe).
-    For consistent age across ALL funnel rows, use a separate CTE from the quiz click joined on device_id:
+    AGE AND GENDER IN FUNNEL QUERIES:
+    $.age and $.gender are stored directly in event_metadata for every event AFTER the user
+    answers the respective quiz question. Always read them directly from the event where available.
+    For events BEFORE the age/gender question (landing_page_view, quiz_start), $.age/$.gender
+    is NULL — backfill using a CTE from pr_funnel_click, joined on device_id.
+
+    Correct pattern — always use COALESCE: direct extraction first, backfill second:
+      COALESCE(JSON_VALUE(af.event_metadata, '$.age'), ag.age, 'unknown') AS age
+      COALESCE(JSON_VALUE(af.event_metadata, '$.gender'), gd.gender, 'unknown') AS gender
+
+    age_data backfill CTE (for landing_page_view and quiz_start only):
       age_data AS (
         SELECT device_id, MAX(JSON_VALUE(event_metadata, '$.question_answer')) AS age
         FROM `hopeful-list-429812-f3.events.funnel-raw-table`
@@ -461,8 +468,18 @@ STANDARD RULES — ALWAYS APPLY THESE
           AND JSON_VALUE(event_metadata, '$.key_value') = 'age'
         GROUP BY 1
       )
-      -- then: LEFT JOIN age_data ag ON e.device_id = ag.device_id
-      -- Use ag.age for all rows — it fills in age even for early funnel events where $.age is NULL.
+      -- LEFT JOIN age_data ag ON ag.device_id = af.device_id
+      -- The COALESCE handles it: if $.age is set on the event, use it. If not, use ag.age backfill.
+
+    Same pattern for gender:
+      gender_data AS (
+        SELECT device_id, MAX(JSON_VALUE(event_metadata, '$.question_answer')) AS gender
+        FROM `hopeful-list-429812-f3.events.funnel-raw-table`
+        WHERE event_name = 'pr_funnel_click'
+          AND JSON_VALUE(event_metadata, '$.key_value') = 'gender'
+        GROUP BY 1
+      )
+      -- COALESCE(JSON_VALUE(af.event_metadata, '$.gender'), gd.gender, 'unknown') AS gender
 
     LANGUAGE LOOKUP: $.language is not available on pr_funnel_subscribe.
     Look it up from pr_funnel_email_submit or pr_funnel_paywall_purchase_click via user_id:
@@ -549,6 +566,14 @@ STANDARD RULES — ALWAYS APPLY THESE
         COUNT(DISTINCT CASE WHEN event_name = 'pr_funnel_email_submit'      THEN user_id   END)
         COUNT(DISTINCT CASE WHEN event_name = 'pr_funnel_subscribe'         THEN user_id   END)
 
+    AGE/GENDER IN all_funnel — always use direct extraction + backfill COALESCE:
+      age_data AS (
+        SELECT device_id, MAX(JSON_VALUE(event_metadata, '$.question_answer')) AS age
+        FROM funnel-raw-table WHERE event_name='pr_funnel_click' AND key_value='age' AND date_filter GROUP BY 1
+      )
+      -- In SELECT: COALESCE(JSON_VALUE(af.event_metadata, '$.age'), ag.age, 'unknown') AS age
+      -- $.age is set on events after the age question; ag.age backfills for landing_page_view/quiz_start
+
     SUBSCRIBER METRICS (LTV, upsell, unsub rate) — NEVER join ltv_ml_fast, all_payments_prod,
       or app-raw-table directly to all_funnel. A user has multiple rows in all_funnel, so a
       direct join fans out and corrupts AVG(ltv) and SUM(upsell).
@@ -557,7 +582,7 @@ STANDARD RULES — ALWAYS APPLY THESE
 
         sub_spine AS (
           SELECT af.user_id, af.device_id, af.geo, af.utm_source_norm, af.quiz_version,
-                 COALESCE(ag.age, 'unknown') AS age
+                 COALESCE(JSON_VALUE(af.event_metadata, '$.age'), ag.age, 'unknown') AS age
           FROM all_funnel af LEFT JOIN age_data ag ON ag.device_id = af.device_id
           WHERE af.event_name = 'pr_funnel_subscribe'
         ),
@@ -654,7 +679,8 @@ age_data AS (
 ),
 funnel_counts AS (
   SELECT
-    COALESCE(ag.age, 'unknown') AS age,
+    -- $.age is set on events after the age question; ag.age backfills for landing/quiz_start
+    COALESCE(JSON_VALUE(af.event_metadata, '$.age'), ag.age, 'unknown') AS age,
     af.geo,
     af.utm_source_norm,
     af.quiz_version,
@@ -672,7 +698,7 @@ funnel_counts AS (
 ),
 sub_spine AS (
   SELECT af.user_id, af.device_id, af.geo, af.utm_source_norm, af.quiz_version,
-         COALESCE(ag.age, 'unknown') AS age
+         COALESCE(JSON_VALUE(af.event_metadata, '$.age'), ag.age, 'unknown') AS age
   FROM all_funnel af
   LEFT JOIN age_data ag ON ag.device_id = af.device_id
   WHERE af.event_name = 'pr_funnel_subscribe'
