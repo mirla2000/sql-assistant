@@ -795,6 +795,114 @@ LEFT JOIN upsell_data u ON s.adset_id = u.utm_adset
 LEFT JOIN early_churn ec ON s.adset_id = ec.utm_adset
 ORDER BY s.total_spend DESC
 LIMIT 500
+
+Q: Raw funnel data at user/event level for last 14 days — one row per funnel event per user, with quiz_version, utm_source, geo. LTV, upsell, unsub_12h only on subscribe row.
+SQL:
+WITH funnel_events AS (
+  SELECT *
+  FROM `hopeful-list-429812-f3.events.funnel-raw-table`
+  WHERE DATE(TIMESTAMP_ADD(timestamp, INTERVAL 300 MINUTE)) >= CURRENT_DATE() - 14
+    AND event_name IN (
+      'pr_funnel_landing_page_view', 'pr_funnel_click', 'pr_funnel_email_page_view',
+      'pr_funnel_email_submit', 'pr_funnel_selling_page_view',
+      'pr_funnel_paywall_view', 'pr_funnel_paywall_purchase_click', 'pr_funnel_subscribe'
+    )
+    AND ip NOT LIKE '173.252%' AND ip NOT LIKE '69.171%' AND ip NOT LIKE '66.220%' AND ip NOT LIKE '31.13%'
+    AND (user_agent NOT LIKE '%AdsBot%' OR user_agent IS NULL)
+    AND (user_agent NOT LIKE '%facebookexternalhit%' OR user_agent IS NULL)
+    AND (user_agent NOT LIKE '%Google-Read-Aloud%' OR user_agent IS NULL)
+),
+quiz_start AS (
+  SELECT device_id, MIN(timestamp) AS timestamp
+  FROM funnel_events WHERE event_name = 'pr_funnel_click'
+  GROUP BY device_id
+),
+ltv_data AS (
+  SELECT customer_account_id, ltv FROM `hopeful-list-429812-f3.analytics_draft.ltv_ml_fast`
+),
+upsell_data AS (
+  SELECT customer_account_id, ROUND(SUM(amount)/100, 2) AS upsell_revenue
+  FROM `hopeful-list-429812-f3.payments.all_payments_prod`
+  WHERE payment_type = 'upsell' AND status = 'settled'
+  GROUP BY 1
+),
+unsub_12h_data AS (
+  SELECT DISTINCT f.user_id
+  FROM funnel_events f
+  JOIN `hopeful-list-429812-f3.events.app-raw-table` a
+    ON a.user_id = f.user_id AND a.event_name = 'pr_webapp_unsubscribed'
+    AND TIMESTAMP_DIFF(a.timestamp, f.timestamp, HOUR) < 12
+  WHERE f.event_name = 'pr_funnel_subscribe'
+),
+device_only_rows AS (
+  SELECT
+    e.device_id, 'undefined' AS user_id,
+    DATE(TIMESTAMP_ADD(e.timestamp, INTERVAL 300 MINUTE)) AS event_date,
+    e.event_name AS funnel_step,
+    JSON_VALUE(e.event_metadata, '$.quiz_version') AS quiz_version,
+    CASE WHEN JSON_VALUE(e.event_metadata, '$.utm_source') IN ('fb_page','fb_bio','fb','fb_post','facebook','insta_bio','insta_page','instagram') THEN 'facebook'
+         WHEN JSON_VALUE(e.event_metadata, '$.utm_source') LIKE '%google%' THEN 'google'
+         WHEN JSON_VALUE(e.event_metadata, '$.utm_source') IN ('tiktok','TikTok') THEN 'tiktok'
+         ELSE 'other' END AS utm_source,
+    CASE WHEN e.country IN ('AE','AT','AU','BH','BN','CA','CZ','DE','DK','ES','FI','FR','GB','HK','IE','IL','IT','JP','KR','NL','NO','PT','QA','SA','SE','SG','SI','US','NZ') THEN 'T1' ELSE 'WW' END AS geo,
+    CAST(NULL AS FLOAT64) AS ltv, CAST(NULL AS FLOAT64) AS upsell_revenue, CAST(NULL AS INT64) AS unsub_12h
+  FROM funnel_events e
+  WHERE e.event_name IN ('pr_funnel_landing_page_view', 'pr_funnel_email_page_view')
+  UNION ALL
+  SELECT
+    qs.device_id, 'undefined' AS user_id,
+    DATE(TIMESTAMP_ADD(qs.timestamp, INTERVAL 300 MINUTE)) AS event_date,
+    'pr_funnel_click' AS funnel_step,
+    JSON_VALUE(e.event_metadata, '$.quiz_version') AS quiz_version,
+    CASE WHEN JSON_VALUE(e.event_metadata, '$.utm_source') IN ('fb_page','fb_bio','fb','fb_post','facebook','insta_bio','insta_page','instagram') THEN 'facebook'
+         WHEN JSON_VALUE(e.event_metadata, '$.utm_source') LIKE '%google%' THEN 'google'
+         WHEN JSON_VALUE(e.event_metadata, '$.utm_source') IN ('tiktok','TikTok') THEN 'tiktok'
+         ELSE 'other' END AS utm_source,
+    CASE WHEN e.country IN ('AE','AT','AU','BH','BN','CA','CZ','DE','DK','ES','FI','FR','GB','HK','IE','IL','IT','JP','KR','NL','NO','PT','QA','SA','SE','SG','SI','US','NZ') THEN 'T1' ELSE 'WW' END AS geo,
+    CAST(NULL AS FLOAT64), CAST(NULL AS FLOAT64), CAST(NULL AS INT64)
+  FROM quiz_start qs
+  JOIN funnel_events e ON e.device_id = qs.device_id AND e.timestamp = qs.timestamp AND e.event_name = 'pr_funnel_click'
+),
+user_rows AS (
+  SELECT
+    e.device_id, e.user_id,
+    DATE(TIMESTAMP_ADD(e.timestamp, INTERVAL 300 MINUTE)) AS event_date,
+    e.event_name AS funnel_step,
+    JSON_VALUE(e.event_metadata, '$.quiz_version') AS quiz_version,
+    CASE WHEN JSON_VALUE(e.event_metadata, '$.utm_source') IN ('fb_page','fb_bio','fb','fb_post','facebook','insta_bio','insta_page','instagram') THEN 'facebook'
+         WHEN JSON_VALUE(e.event_metadata, '$.utm_source') LIKE '%google%' THEN 'google'
+         WHEN JSON_VALUE(e.event_metadata, '$.utm_source') IN ('tiktok','TikTok') THEN 'tiktok'
+         ELSE 'other' END AS utm_source,
+    CASE WHEN e.country IN ('AE','AT','AU','BH','BN','CA','CZ','DE','DK','ES','FI','FR','GB','HK','IE','IL','IT','JP','KR','NL','NO','PT','QA','SA','SE','SG','SI','US','NZ') THEN 'T1' ELSE 'WW' END AS geo,
+    CAST(NULL AS FLOAT64), CAST(NULL AS FLOAT64), CAST(NULL AS INT64)
+  FROM funnel_events e
+  WHERE e.event_name IN ('pr_funnel_email_submit','pr_funnel_selling_page_view','pr_funnel_paywall_view','pr_funnel_paywall_purchase_click')
+),
+subscribe_rows AS (
+  SELECT
+    e.device_id, e.user_id,
+    DATE(TIMESTAMP_ADD(e.timestamp, INTERVAL 300 MINUTE)) AS event_date,
+    e.event_name AS funnel_step,
+    JSON_VALUE(e.event_metadata, '$.quiz_version') AS quiz_version,
+    CASE WHEN JSON_VALUE(e.event_metadata, '$.utm_source') IN ('fb_page','fb_bio','fb','fb_post','facebook','insta_bio','insta_page','instagram') THEN 'facebook'
+         WHEN JSON_VALUE(e.event_metadata, '$.utm_source') LIKE '%google%' THEN 'google'
+         WHEN JSON_VALUE(e.event_metadata, '$.utm_source') IN ('tiktok','TikTok') THEN 'tiktok'
+         ELSE 'other' END AS utm_source,
+    CASE WHEN e.country IN ('AE','AT','AU','BH','BN','CA','CZ','DE','DK','ES','FI','FR','GB','HK','IE','IL','IT','JP','KR','NL','NO','PT','QA','SA','SE','SG','SI','US','NZ') THEN 'T1' ELSE 'WW' END AS geo,
+    ROUND(l.ltv, 2) AS ltv,
+    COALESCE(u.upsell_revenue, 0) AS upsell_revenue,
+    CASE WHEN un.user_id IS NOT NULL THEN 1 ELSE 0 END AS unsub_12h
+  FROM funnel_events e
+  LEFT JOIN ltv_data l ON e.user_id = l.customer_account_id
+  LEFT JOIN upsell_data u ON e.user_id = u.customer_account_id
+  LEFT JOIN unsub_12h_data un ON e.user_id = un.user_id
+  WHERE e.event_name = 'pr_funnel_subscribe'
+)
+SELECT * FROM device_only_rows
+UNION ALL SELECT * FROM user_rows
+UNION ALL SELECT * FROM subscribe_rows
+ORDER BY device_id, event_date, funnel_step
+LIMIT 5000
 """
 
 _FIX_TEMPLATE = """\
