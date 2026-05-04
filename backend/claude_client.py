@@ -275,6 +275,11 @@ Count fraud by fraud_issue_date, chargebacks by dispute_issue_date, transactions
 Card metrics (VAMP, ECM, EFM, fraud rate, chargeback rate) are SEPARATE from PayPal metrics.
 PayPal metrics always use solid_paypal_disputes only — never mix with card chargeback tables.
 
+PERIOD LABELING: When reporting a risk profile for a target month (e.g. "April 2026"), always label ALL
+rows/columns with that target month — even ECM/EFM (which use the previous month's data) and PayPal
+claim/dispute rates (which use a 3-month window). The period label reflects the reporting month, not
+the calculation window. Never use labels like "March 2026" or "Jan-Mar 2026" in a report asked for April.
+
 ⚠️ MID NAMING MISMATCH: mid values differ between risk tables and all_payments_prod — do NOT join on mid.
   In fraud_final / chargebacks_final: 'adyen uae', 'adyen us (primer)', 'adyen us (solidgate)', 'checkout'
   In all_payments_prod: 'adyen', 'adyen_us', UUIDs for solidgate, 'checkout'
