@@ -2,7 +2,13 @@ import { useState } from 'react'
 
 function formatSql(sql) {
   if (!sql) return ''
-  return sql
+  // Preserve string literals before lowercasing so values like UUIDs stay intact
+  const literals = []
+  const masked = sql.replace(/'[^']*'/g, match => {
+    literals.push(match)
+    return `\x00LIT${literals.length - 1}\x00`
+  })
+  const s = masked
     .toLowerCase()
     .trim()
     .replace(/\bunion all\b/g, '\nunion all\n')
@@ -17,6 +23,7 @@ function formatSql(sql) {
     .replace(/\bhaving\b/g, '\nhaving')
     .replace(/\blimit\b/g, '\nlimit')
     .replace(/^\n+/, '')
+  return s.replace(/\x00lit(\d+)\x00/g, (_, i) => literals[parseInt(i)])
 }
 
 const PAGE_SIZES = [10, 25, 50, 100]
