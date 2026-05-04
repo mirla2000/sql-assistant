@@ -520,10 +520,201 @@ STANDARD RULES — ALWAYS APPLY THESE
        LEFT JOIN spend ON spend.campaign_id = JSON_VALUE(f.event_metadata, '$.utm_campaign')
     ❌ FROM google_campaigns g JOIN funnel-raw-table f ON ... (no pre-aggregation)
 
+15. FUNNEL QUERY STRUCTURE — always build funnel queries with this 3-CTE pattern:
+
+    STEP 1 — base_events: all key events EXCEPT pr_funnel_click, with all filters applied.
+      Default event set:
+        'pr_funnel_landing_page_view', 'pr_funnel_email_page_view', 'pr_funnel_email_submit',
+        'pr_funnel_selling_page_view', 'pr_funnel_paywall_view',
+        'pr_funnel_paywall_purchase_click', 'pr_funnel_subscribe'
+
+    STEP 2 — quiz_start: pr_funnel_click fires for EVERY quiz answer. Get the FIRST click per
+      device (ROW_NUMBER OVER PARTITION BY device_id ORDER BY timestamp, rn=1), rename it
+      'pr_funnel_quiz_start', then UNION ALL with base_events.
+      quiz_start CTE pattern:
+        SELECT device_id, NULL AS user_id, 'pr_funnel_quiz_start' AS event_name, timestamp, ...
+        FROM (
+          SELECT *, ROW_NUMBER() OVER (PARTITION BY device_id ORDER BY timestamp) AS rn
+          FROM funnel-raw-table WHERE event_name = 'pr_funnel_click' AND [date + bot filters]
+        ) WHERE rn = 1
+
+    STEP 3 — all_funnel: UNION ALL of base_events and quiz_start.
+
+    USER IDENTITY RULE:
+      Events before email_submit (landing, email_page_view, quiz_start) → unique user = device_id
+      Events from email_submit onwards → unique user = user_id
+      Always:
+        COUNT(DISTINCT CASE WHEN event_name = 'pr_funnel_landing_page_view' THEN device_id END)
+        COUNT(DISTINCT CASE WHEN event_name = 'pr_funnel_quiz_start'        THEN device_id END)
+        COUNT(DISTINCT CASE WHEN event_name = 'pr_funnel_email_submit'      THEN user_id   END)
+        COUNT(DISTINCT CASE WHEN event_name = 'pr_funnel_subscribe'         THEN user_id   END)
+
+    SUBSCRIBER METRICS (LTV, upsell, unsub rate) — NEVER join ltv_ml_fast, all_payments_prod,
+      or app-raw-table directly to all_funnel. A user has multiple rows in all_funnel, so a
+      direct join fans out and corrupts AVG(ltv) and SUM(upsell).
+      Always use a separate sub_spine CTE (one row per subscriber), compute sub_metrics
+      from it (one row per group), then LEFT JOIN sub_metrics to funnel_counts at the end:
+
+        sub_spine AS (
+          SELECT af.user_id, af.device_id, af.geo, af.utm_source_norm, af.quiz_version,
+                 COALESCE(ag.age, 'unknown') AS age
+          FROM all_funnel af LEFT JOIN age_data ag ON ag.device_id = af.device_id
+          WHERE af.event_name = 'pr_funnel_subscribe'
+        ),
+        sub_metrics AS (
+          SELECT sp.age, sp.geo, sp.utm_source_norm, sp.quiz_version,
+            ROUND(AVG(COALESCE(l.ltv, 0)), 2) AS avg_ltv,
+            ROUND(SAFE_DIVIDE(SUM(COALESCE(u.upsell_revenue, 0)), COUNT(DISTINCT sp.user_id)), 2) AS avg_upsell_per_sub,
+            ROUND(SAFE_DIVIDE(COUNT(DISTINCT un.user_id), COUNT(DISTINCT sp.user_id)) * 100, 2) AS unsub_12h_rate_pct
+          FROM sub_spine sp
+          LEFT JOIN `analytics_draft.ltv_ml_fast` l ON l.customer_account_id = sp.user_id
+          LEFT JOIN (
+            SELECT customer_account_id, SUM(amount)/100 AS upsell_revenue
+            FROM `payments.all_payments_prod` WHERE payment_type='upsell' AND status='settled' GROUP BY 1
+          ) u ON u.customer_account_id = sp.user_id
+          LEFT JOIN (
+            SELECT DISTINCT f2.user_id
+            FROM all_funnel f2 JOIN `events.app-raw-table` a ON a.user_id = f2.user_id
+            WHERE f2.event_name = 'pr_funnel_subscribe'
+              AND a.event_name = 'pr_webapp_unsubscribed'
+              AND TIMESTAMP_DIFF(a.timestamp, f2.timestamp, HOUR) < 12
+          ) un ON un.user_id = sp.user_id
+          GROUP BY 1, 2, 3, 4
+        )
+        -- Final SELECT: funnel_counts LEFT JOIN sub_metrics USING (age, geo, utm_source_norm, quiz_version)
+
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 EXAMPLES
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 NOTE: Examples illustrate structure and patterns only. Always follow the rules above, even if an example appears to differ.
+
+Q: Aggregated funnel conversion last 7 days filtered to quiz versions 6.1.16, 7.0.0, 7.2.3 — breakdown by age, geo, utm_source, quiz_version. Include avg LTV, avg upsell per sub, unsub rate.
+SQL:
+WITH base_events AS (
+  SELECT
+    device_id, user_id, event_name, timestamp, country,
+    JSON_VALUE(event_metadata, '$.quiz_version') AS quiz_version,
+    CASE
+      WHEN JSON_VALUE(event_metadata, '$.utm_source') IN ('fb_page','fb_bio','fb','fb_post','facebook','insta_bio','insta_page','instagram') THEN 'facebook'
+      WHEN JSON_VALUE(event_metadata, '$.utm_source') LIKE '%google%' THEN 'google'
+      WHEN JSON_VALUE(event_metadata, '$.utm_source') IN ('tiktok','TikTok') THEN 'tiktok'
+      ELSE 'other'
+    END AS utm_source_norm,
+    CASE WHEN country IN ('AE','AT','AU','BH','BN','CA','CZ','DE','DK','ES','FI','FR','GB','HK','IE','IL','IT','JP','KR','NL','NO','PT','QA','SA','SE','SG','SI','US','NZ') THEN 'T1' ELSE 'WW' END AS geo
+  FROM `hopeful-list-429812-f3.events.funnel-raw-table`
+  WHERE event_name IN (
+    'pr_funnel_landing_page_view', 'pr_funnel_email_page_view', 'pr_funnel_email_submit',
+    'pr_funnel_selling_page_view', 'pr_funnel_paywall_view',
+    'pr_funnel_paywall_purchase_click', 'pr_funnel_subscribe'
+  )
+    AND DATE(TIMESTAMP_ADD(timestamp, INTERVAL 300 MINUTE)) >= CURRENT_DATE() - 7
+    AND JSON_VALUE(event_metadata, '$.quiz_version') IN ('6.1.16', '7.0.0', '7.2.3')
+    AND ip NOT LIKE '173.252%' AND ip NOT LIKE '69.171%' AND ip NOT LIKE '66.220%' AND ip NOT LIKE '31.13%'
+    AND (user_agent NOT LIKE '%AdsBot%' OR user_agent IS NULL)
+    AND (user_agent NOT LIKE '%facebookexternalhit%' OR user_agent IS NULL)
+    AND (user_agent NOT LIKE '%Google-Read-Aloud%' OR user_agent IS NULL)
+),
+quiz_start AS (
+  SELECT
+    device_id, NULL AS user_id, 'pr_funnel_quiz_start' AS event_name, timestamp, country,
+    JSON_VALUE(event_metadata, '$.quiz_version') AS quiz_version,
+    CASE
+      WHEN JSON_VALUE(event_metadata, '$.utm_source') IN ('fb_page','fb_bio','fb','fb_post','facebook','insta_bio','insta_page','instagram') THEN 'facebook'
+      WHEN JSON_VALUE(event_metadata, '$.utm_source') LIKE '%google%' THEN 'google'
+      WHEN JSON_VALUE(event_metadata, '$.utm_source') IN ('tiktok','TikTok') THEN 'tiktok'
+      ELSE 'other'
+    END AS utm_source_norm,
+    CASE WHEN country IN ('AE','AT','AU','BH','BN','CA','CZ','DE','DK','ES','FI','FR','GB','HK','IE','IL','IT','JP','KR','NL','NO','PT','QA','SA','SE','SG','SI','US','NZ') THEN 'T1' ELSE 'WW' END AS geo
+  FROM (
+    SELECT *,
+      ROW_NUMBER() OVER (PARTITION BY device_id ORDER BY timestamp) AS rn
+    FROM `hopeful-list-429812-f3.events.funnel-raw-table`
+    WHERE event_name = 'pr_funnel_click'
+      AND DATE(TIMESTAMP_ADD(timestamp, INTERVAL 300 MINUTE)) >= CURRENT_DATE() - 7
+      AND JSON_VALUE(event_metadata, '$.quiz_version') IN ('6.1.16', '7.0.0', '7.2.3')
+      AND ip NOT LIKE '173.252%' AND ip NOT LIKE '69.171%' AND ip NOT LIKE '66.220%' AND ip NOT LIKE '31.13%'
+      AND (user_agent NOT LIKE '%AdsBot%' OR user_agent IS NULL)
+      AND (user_agent NOT LIKE '%facebookexternalhit%' OR user_agent IS NULL)
+      AND (user_agent NOT LIKE '%Google-Read-Aloud%' OR user_agent IS NULL)
+  )
+  WHERE rn = 1
+),
+all_funnel AS (
+  SELECT * FROM base_events
+  UNION ALL
+  SELECT * FROM quiz_start
+),
+age_data AS (
+  SELECT device_id, MAX(JSON_VALUE(event_metadata, '$.question_answer')) AS age
+  FROM `hopeful-list-429812-f3.events.funnel-raw-table`
+  WHERE event_name = 'pr_funnel_click'
+    AND JSON_VALUE(event_metadata, '$.key_value') = 'age'
+    AND DATE(TIMESTAMP_ADD(timestamp, INTERVAL 300 MINUTE)) >= CURRENT_DATE() - 7
+  GROUP BY 1
+),
+funnel_counts AS (
+  SELECT
+    COALESCE(ag.age, 'unknown') AS age,
+    af.geo,
+    af.utm_source_norm,
+    af.quiz_version,
+    COUNT(DISTINCT CASE WHEN event_name = 'pr_funnel_landing_page_view'      THEN af.device_id END) AS landing_views,
+    COUNT(DISTINCT CASE WHEN event_name = 'pr_funnel_quiz_start'             THEN af.device_id END) AS quiz_starts,
+    COUNT(DISTINCT CASE WHEN event_name = 'pr_funnel_email_page_view'        THEN af.device_id END) AS email_page_views,
+    COUNT(DISTINCT CASE WHEN event_name = 'pr_funnel_email_submit'           THEN af.user_id   END) AS email_submits,
+    COUNT(DISTINCT CASE WHEN event_name = 'pr_funnel_selling_page_view'      THEN af.user_id   END) AS selling_page_views,
+    COUNT(DISTINCT CASE WHEN event_name = 'pr_funnel_paywall_view'           THEN af.user_id   END) AS paywall_views,
+    COUNT(DISTINCT CASE WHEN event_name = 'pr_funnel_paywall_purchase_click' THEN af.user_id   END) AS try_to_pays,
+    COUNT(DISTINCT CASE WHEN event_name = 'pr_funnel_subscribe'              THEN af.user_id   END) AS subscriptions
+  FROM all_funnel af
+  LEFT JOIN age_data ag ON ag.device_id = af.device_id
+  GROUP BY 1, 2, 3, 4
+),
+sub_spine AS (
+  SELECT af.user_id, af.device_id, af.geo, af.utm_source_norm, af.quiz_version,
+         COALESCE(ag.age, 'unknown') AS age
+  FROM all_funnel af
+  LEFT JOIN age_data ag ON ag.device_id = af.device_id
+  WHERE af.event_name = 'pr_funnel_subscribe'
+),
+sub_metrics AS (
+  SELECT
+    sp.age, sp.geo, sp.utm_source_norm, sp.quiz_version,
+    ROUND(AVG(COALESCE(l.ltv, 0)), 2) AS avg_ltv,
+    ROUND(SAFE_DIVIDE(SUM(COALESCE(u.upsell_revenue, 0)), COUNT(DISTINCT sp.user_id)), 2) AS avg_upsell_per_sub,
+    ROUND(SAFE_DIVIDE(COUNT(DISTINCT un.user_id), COUNT(DISTINCT sp.user_id)) * 100, 2) AS unsub_12h_rate_pct
+  FROM sub_spine sp
+  LEFT JOIN `hopeful-list-429812-f3.analytics_draft.ltv_ml_fast` l ON l.customer_account_id = sp.user_id
+  LEFT JOIN (
+    SELECT customer_account_id, SUM(amount) / 100 AS upsell_revenue
+    FROM `hopeful-list-429812-f3.payments.all_payments_prod`
+    WHERE payment_type = 'upsell' AND status = 'settled'
+    GROUP BY 1
+  ) u ON u.customer_account_id = sp.user_id
+  LEFT JOIN (
+    SELECT DISTINCT f2.user_id
+    FROM all_funnel f2
+    JOIN `hopeful-list-429812-f3.events.app-raw-table` a ON a.user_id = f2.user_id
+    WHERE f2.event_name = 'pr_funnel_subscribe'
+      AND a.event_name = 'pr_webapp_unsubscribed'
+      AND TIMESTAMP_DIFF(a.timestamp, f2.timestamp, HOUR) < 12
+  ) un ON un.user_id = sp.user_id
+  GROUP BY 1, 2, 3, 4
+)
+SELECT
+  fc.age, fc.geo, fc.utm_source_norm AS utm_source, fc.quiz_version,
+  fc.landing_views, fc.quiz_starts, fc.email_page_views, fc.email_submits,
+  fc.selling_page_views, fc.paywall_views, fc.try_to_pays, fc.subscriptions,
+  ROUND(SAFE_DIVIDE(fc.quiz_starts,    fc.landing_views) * 100, 2) AS quiz_start_rate_pct,
+  ROUND(SAFE_DIVIDE(fc.email_submits,  fc.landing_views) * 100, 2) AS email_submit_rate_pct,
+  ROUND(SAFE_DIVIDE(fc.paywall_views,  fc.landing_views) * 100, 2) AS paywall_view_rate_pct,
+  ROUND(SAFE_DIVIDE(fc.try_to_pays,    fc.landing_views) * 100, 2) AS ttp_rate_pct,
+  ROUND(SAFE_DIVIDE(fc.subscriptions,  fc.landing_views) * 100, 4) AS cvr_pct,
+  sm.avg_ltv, sm.avg_upsell_per_sub, sm.unsub_12h_rate_pct
+FROM funnel_counts fc
+LEFT JOIN sub_metrics sm USING (age, geo, utm_source_norm, quiz_version)
+ORDER BY fc.subscriptions DESC
+LIMIT 500
 
 Q: How many subscriptions per day last 7 days?
 SQL:
