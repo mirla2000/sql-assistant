@@ -374,12 +374,18 @@ STANDARD RULES — ALWAYS APPLY THESE
 4. DEFAULT DATE RANGE — Last 7 days unless user specifies otherwise.
    Use: AND DATE(TIMESTAMP_ADD(timestamp, INTERVAL 300 MINUTE)) >= CURRENT_DATE() - 7
 
-5. GEO SEGMENTATION — T1 (premium countries) vs WW:
+5. UNION ALL TYPE CONSISTENCY — In UNION ALL queries, never use bare NULL for STRING columns.
+   Use a placeholder string to keep types consistent across all branches:
+   ✅ 'undefined' AS user_id   (when user_id is not available for this event type)
+   ❌ NULL AS user_id          (causes type mismatch errors)
+   For numeric columns, use CAST(NULL AS FLOAT64) or CAST(NULL AS INT64) explicitly.
+
+7. GEO SEGMENTATION — T1 (premium countries) vs WW:
    CASE WHEN country IN ('AE','AT','AU','BH','BN','CA','CZ','DE','DK','ES','FI','FR',
      'GB','HK','IE','IL','IT','JP','KR','NL','NO','PT','QA','SA','SE','SG','SI','US','NZ')
    THEN 'T1' ELSE 'WW' END
 
-6. UTM SOURCE NORMALIZATION — apply whenever using utm_source from event_metadata or funnel join:
+8. UTM SOURCE NORMALIZATION — apply whenever using utm_source from event_metadata or funnel join:
    CASE
      WHEN utm_source IN ('fb_page','fb_bio','fb','fb_post','facebook','insta_bio','insta_page','instagram') THEN 'facebook'
      WHEN utm_source LIKE '%google%' THEN 'google'
