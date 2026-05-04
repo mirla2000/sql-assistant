@@ -1276,9 +1276,10 @@ class ClaudeClient:
             {"role": "user", "content": question},
         ]
         response = self.client.chat.completions.create(
-            model="anthropic/claude-sonnet-4-5",
+            model="anthropic/claude-haiku-4-5",
             messages=messages,
             temperature=0.0,
+            max_tokens=4096,
         )
         return _clean_sql(response.choices[0].message.content)
 
