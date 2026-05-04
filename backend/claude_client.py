@@ -140,13 +140,21 @@ hopeful-list-429812-f3.payments.all_payments_prod
                currency, status ('settled'/'declined'), channel, mid,
                date (DATE — use this for date filtering, already truncated to day),
                created_at (INT64 — microsecond timestamp, use TIMESTAMP_MICROS(created_at) for full precision),
+               settle_interval (INT64 — hours after created_at when the transaction is settled),
                payment_type, payment_method, subscription_id, paid_count,
                card_brand, card_type, geo_country, subscription_cohort_date
-  DATE HANDLING: Always use created_at for date filtering — NOT the date column.
-    Convert: DATE(TIMESTAMP_MICROS(p.created_at)) for date comparisons.
-    ✅ WHERE DATE(TIMESTAMP_MICROS(p.created_at)) >= CURRENT_DATE() - 30
-    ✅ DATE_TRUNC(DATE(TIMESTAMP_MICROS(p.created_at)), MONTH) AS month
-    For exchange_rate join: DATE(TIMESTAMP_MICROS(p.created_at)) = ex.date
+
+  DATE HANDLING — TWO DATE DIMENSIONS:
+    authorized_at  = TIMESTAMP_MICROS(created_at)           — when the charge was attempted
+    settled_at     = TIMESTAMP_ADD(TIMESTAMP_MICROS(created_at), INTERVAL settle_interval HOUR)
+                                                             — when funds were actually received
+  Use authorized_at (created_at) as the default for date filtering.
+  Use settled_at when the question is about when revenue was actually collected/settled.
+    ✅ Authorized date: DATE(TIMESTAMP_MICROS(p.created_at))
+    ✅ Settled date:    DATE(TIMESTAMP_ADD(TIMESTAMP_MICROS(p.created_at), INTERVAL p.settle_interval HOUR))
+    ✅ Monthly bucket by authorization: DATE_TRUNC(DATE(TIMESTAMP_MICROS(p.created_at)), MONTH)
+    ✅ Monthly bucket by settlement:    DATE_TRUNC(DATE(TIMESTAMP_ADD(TIMESTAMP_MICROS(p.created_at), INTERVAL p.settle_interval HOUR)), MONTH)
+  For exchange_rate join: use DATE(TIMESTAMP_MICROS(p.created_at)) = ex.date
   ALWAYS filter: WHERE status = 'settled'
 
   payment_type values: 'first' (trial), 'recurring' (rebill), 'upsell', 'first_verification' ($1 card check — exclude from revenue)
