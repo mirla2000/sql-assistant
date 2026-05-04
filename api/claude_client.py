@@ -284,7 +284,7 @@ PayPal metrics always use solid_paypal_disputes only — never mix with card cha
       WHEN mid = 'adyen'                                         THEN 'adyen uae'
       WHEN mid = 'adyen_us'                                      THEN 'adyen us (primer)'
       WHEN mid IN ('d4d7b345-bf19-453a-acdc-8ea68a5d4c44',
-                   '01KMFGBBW8RDNQJV20QPM8MMN')                  THEN 'adyen us (solidgate)'
+                   '01KMFGBBWW8RDNQJV20QPM8MMN')                 THEN 'adyen us (solidgate)'
       ELSE mid  -- some UUIDs appear in both tables, keep as-is
     END AS risk_mid
 
@@ -1276,7 +1276,7 @@ class ClaudeClient:
             {"role": "user", "content": question},
         ]
         response = self.client.chat.completions.create(
-            model="google/gemini-3-flash-preview",
+            model="anthropic/claude-sonnet-4-5",
             messages=messages,
             temperature=0.0,
         )
