@@ -1,4 +1,3 @@
-import SqlPanel from './SqlPanel'
 import ResultsTable from './ResultsTable'
 
 export default function ChatMessage({ message }) {
@@ -27,14 +26,12 @@ export default function ChatMessage({ message }) {
         {message.error ? (
           <div className="error-box">{message.error}</div>
         ) : (
-          <>
-            <SqlPanel sql={message.sql} />
-            <ResultsTable
-              columns={message.columns}
-              rows={message.rows}
-              rowCount={message.row_count}
-            />
-          </>
+          <ResultsTable
+            sql={message.sql}
+            columns={message.columns}
+            rows={message.rows}
+            rowCount={message.row_count}
+          />
         )}
       </div>
     </div>

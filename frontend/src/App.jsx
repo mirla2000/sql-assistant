@@ -5,6 +5,16 @@ import ChatMessage from './components/ChatMessage'
 import DashboardGrid from './components/DashboardGrid'
 import QueryHistory from './components/QueryHistory'
 
+function DatabasePanel({ schema }) {
+  if (!schema) return <div className="db-loading"><div className="spinner" /><p>Loading schema…</p></div>
+  return (
+    <div className="db-panel">
+      <h2 className="db-title">Database Schema</h2>
+      <pre className="db-schema">{schema}</pre>
+    </div>
+  )
+}
+
 export default function App() {
   const [mode, setMode] = useState('chat')
   const [messages, setMessages] = useState([])
@@ -16,6 +26,7 @@ export default function App() {
   const [theme, setTheme] = useState(() => localStorage.getItem('theme') || 'dark')
   const [chatExample, setChatExample] = useState({ q: '', k: 0 })
   const [dashExample, setDashExample] = useState({ q: '', k: 0 })
+  const [dbSchema, setDbSchema] = useState(null)
   const threadRef = useRef(null)
 
   useEffect(() => {
@@ -23,13 +34,17 @@ export default function App() {
     localStorage.setItem('theme', theme)
   }, [theme])
 
-  const fillChat = useCallback((q) => setChatExample(p => ({ q, k: p.k + 1 })), [])
-  const fillDash = useCallback((q) => setDashExample(p => ({ q, k: p.k + 1 })), [])
+  useEffect(() => {
+    if (mode === 'database' && !dbSchema) {
+      fetch('/api/schema').then(r => r.json()).then(d => setDbSchema(d.schema)).catch(() => setDbSchema('Failed to load schema.'))
+    }
+  }, [mode, dbSchema])
+
+  const fillChat = useCallback((q) => { setMode('chat'); setChatExample(p => ({ q, k: p.k + 1 })) }, [])
+  const fillDash = useCallback((q) => { setMode('dashboard'); setDashExample(p => ({ q, k: p.k + 1 })) }, [])
 
   useEffect(() => {
-    if (threadRef.current) {
-      threadRef.current.scrollTop = threadRef.current.scrollHeight
-    }
+    if (threadRef.current) threadRef.current.scrollTop = threadRef.current.scrollHeight
   }, [messages])
 
   function buildHistory(msgs) {
@@ -72,9 +87,7 @@ export default function App() {
   function handleNewChat() {
     if (messages.length > 0) {
       const firstQuestion = messages.find(m => m.role === 'user')?.content || 'Untitled'
-      setConversations(prev => [{
-        id: crypto.randomUUID(), messages: [...messages], firstQuestion, timestamp: new Date(),
-      }, ...prev])
+      setConversations(prev => [{ id: crypto.randomUUID(), messages: [...messages], firstQuestion, timestamp: new Date() }, ...prev])
     }
     setMessages([])
   }
@@ -145,35 +158,53 @@ export default function App() {
     runChart(chart.id, chart.sql)
   }
 
+  const NAV = [
+    { id: 'chat',      icon: '💬', label: 'Chat' },
+    { id: 'dashboard', icon: '📊', label: 'Dashboard' },
+    { id: 'database',  icon: '🗄️',  label: 'Database' },
+  ]
+
   return (
     <div className="app">
       <aside className="sidebar">
         <div className="sidebar-header">
           <span className="logo">⚡ SQL Assistant</span>
         </div>
-        <QueryHistory conversations={conversations} onSelect={handleSelectConversation} />
+
+        <nav className="sidebar-nav">
+          {NAV.map(item => (
+            <button
+              key={item.id}
+              className={`nav-item${mode === item.id ? ' active' : ''}`}
+              onClick={() => setMode(item.id)}
+            >
+              <span className="nav-icon">{item.icon}</span>
+              <span>{item.label}</span>
+            </button>
+          ))}
+        </nav>
+
+        {mode === 'chat' && (
+          <div className="sidebar-section">
+            <div className="sidebar-section-header">
+              <span>History</span>
+              <button className="new-chat-btn" onClick={handleNewChat}>+ New</button>
+            </div>
+            <QueryHistory conversations={conversations} onSelect={handleSelectConversation} />
+          </div>
+        )}
       </aside>
 
       <main className="main">
         <div className="main-header">
-          <div className="mode-toggle">
-            <button
-              className={`mode-btn ${mode === 'chat' ? 'active' : ''}`}
-              onClick={() => setMode('chat')}
-            >Chat</button>
-            <button
-              className={`mode-btn ${mode === 'dashboard' ? 'active' : ''}`}
-              onClick={() => setMode('dashboard')}
-            >Dashboard</button>
+          <div className="main-header-title">
+            {mode === 'chat' && 'Chat'}
+            {mode === 'dashboard' && 'Dashboard'}
+            {mode === 'database' && 'Database'}
           </div>
-          <div style={{ display: 'flex', gap: 8 }}>
-            <button className="theme-toggle" onClick={() => setTheme(t => t === 'dark' ? 'light' : 'dark')}>
-              {theme === 'dark' ? '☀ Light' : '☾ Dark'}
-            </button>
-            {mode === 'chat' && (
-              <button className="new-chat-btn" onClick={handleNewChat}>+ New chat</button>
-            )}
-          </div>
+          <button className="theme-toggle" onClick={() => setTheme(t => t === 'dark' ? 'light' : 'dark')}>
+            {theme === 'dark' ? '☀ Light' : '☾ Dark'}
+          </button>
         </div>
 
         <div className="content" ref={mode === 'chat' ? threadRef : null}>
@@ -210,7 +241,7 @@ export default function App() {
                 {messages.map(msg => <ChatMessage key={msg.id} message={msg} />)}
               </div>
             )
-          ) : (
+          ) : mode === 'dashboard' ? (
             dashboardLoading ? (
               <div className="dashboard-loading">
                 <div className="spinner" />
@@ -251,13 +282,17 @@ export default function App() {
                 </div>
               </div>
             )
+          ) : (
+            <DatabasePanel schema={dbSchema} />
           )}
         </div>
 
-        {mode === 'chat'
-          ? <ChatInput key={chatExample.k} initialValue={chatExample.q} onSubmit={handleQuery} loading={loading} />
-          : <DashboardInput key={dashExample.k} initialValue={dashExample.q} onSubmit={handleDashboard} loading={dashboardLoading} />
-        }
+        {mode === 'chat' && (
+          <ChatInput key={chatExample.k} initialValue={chatExample.q} onSubmit={handleQuery} loading={loading} />
+        )}
+        {mode === 'dashboard' && (
+          <DashboardInput key={dashExample.k} initialValue={dashExample.q} onSubmit={handleDashboard} loading={dashboardLoading} />
+        )}
       </main>
     </div>
   )
