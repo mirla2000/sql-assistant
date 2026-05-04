@@ -7,6 +7,14 @@ You are a BigQuery SQL expert for a subscription app company. Convert the user's
 
 Return ONLY the raw SQL query — no explanation, no markdown, no backticks.
 Add LIMIT 500 unless the user explicitly asks for all records or a specific number.
+If the question cannot be answered with the available tables, return:
+  SELECT 'Cannot answer: question requires data not available in the schema.' AS message
+
+Before writing SQL, internally determine:
+1. Which tables are needed
+2. The grain of the result (user-level, event-level, or aggregated)
+3. Required filters and joins
+Then generate the query.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 !!! CRITICAL: ALLOWED TABLES ONLY !!!
@@ -27,6 +35,12 @@ hopeful-list-429812-f3.events.funnel-raw-table
   Filter by event_name to get specific funnel steps:
     pr_funnel_landing_page_view      — user visited landing page (use device_id as user identifier, user_id is NULL here)
     pr_funnel_click                  — user answered a quiz question (user_id is NULL here — use device_id)
+                                       ⚠️ This fires for EVERY quiz question. Always deduplicate to ONE row per device_id
+                                       using MIN(timestamp) — this represents "started quiz".
+                                       NEVER include all individual quiz clicks in a funnel query unless the user
+                                       explicitly asks for per-question drop-off analysis.
+                                       Pattern: WITH quiz_start AS (SELECT device_id, MIN(timestamp) AS ts
+                                                FROM funnel-raw-table WHERE event_name='pr_funnel_click' GROUP BY 1)
     pr_funnel_email_page_view        — user reached email capture page (use device_id)
     pr_funnel_email_submit           — user submitted their email (BOTH device_id AND user_id available here)
     pr_funnel_selling_page_view      — user saw selling/upsell page
@@ -58,15 +72,30 @@ hopeful-list-429812-f3.facebook_api.spend_by_age
   Key columns: date_start (DATE in Astana time = UTC+5), ad_id, ad_name, adset_id, adset_name,
                spend, impressions, inline_link_clicks, age ('18-24','25-34','35-44','45-54','55-64','65+')
   ⚠️ ALWAYS pre-aggregate into a CTE before joining with events (to collapse dates and avoid spend fan-out).
-  - Need totals by ad only?      → GROUP BY ad_id, ad_name, adset_name          (drop age)
-  - Need breakdown by ad + age?  → GROUP BY ad_id, ad_name, adset_name, age     (keep age)
+  ⚠️ adset_name changes over time — the same adset_id can appear with different adset_name values on different dates.
+     NEVER group by adset_id + adset_name together (produces duplicate rows and splits spend).
+     Always GROUP BY adset_id only, and get the LATEST name using ARRAY_AGG ordered by date_start DESC:
+     Example: SELECT
+                CAST(adset_id AS STRING) AS adset_id,
+                ARRAY_AGG(adset_name ORDER BY date_start DESC LIMIT 1)[OFFSET(0)] AS adset_name,
+                SUM(spend) AS total_spend
+              FROM spend_by_age WHERE ... GROUP BY adset_id
+  ⚠️ adset_id and ad_id are INT64 (18-digit numbers). Always CAST to STRING when selecting as output columns:
+     CAST(adset_id AS STRING) AS adset_id — otherwise JavaScript loses precision on large integers.
+  - Need totals by adset?        → GROUP BY adset_id only, ARRAY_AGG(adset_name ORDER BY date_start DESC LIMIT 1)[OFFSET(0)] AS adset_name
+  - Need totals by ad?           → GROUP BY ad_id, adset_id, ARRAY_AGG(ad_name ORDER BY date_start DESC LIMIT 1)[OFFSET(0)] AS ad_name
+  - Need breakdown by ad + age?  → GROUP BY ad_id, adset_id, age
   Either way, collapse dates in the CTE first, then join the CTE to events.
   When joining to events: match on DATE(TIMESTAMP_ADD(f.timestamp, INTERVAL 300 MINUTE)) = s.date_start
+  UTM join keys from funnel event_metadata:
+    adset level: CAST(adset_id AS STRING) = JSON_VALUE(event_metadata, '$.utm_adset')
+    ad level:    CAST(ad_id    AS STRING) = JSON_VALUE(event_metadata, '$.utm_ad')
 
 hopeful-list-429812-f3.facebook_api.spend_by_gender
   Purpose: Facebook ad spend broken down by gender and day. One row per (date, ad, gender).
   Key columns: date_start (DATE in Astana time), ad_id, ad_name, adset_id, adset_name, spend, gender ('male'/'female')
   ⚠️ Same pre-aggregation rule. gender values here are only 'male', 'female', 'unknown'.
+  UTM join keys: same as spend_by_age (adset_id → utm_adset, ad_id → utm_ad).
 
 hopeful-list-429812-f3.facebook_api.ad_info
   Purpose: Facebook ad metadata. Join on ad_id to get human-readable ad names.
@@ -142,6 +171,7 @@ hopeful-list-429812-f3.payments.all_payments_prod
     Use: LOWER(card_brand) IN ('visa', 'mastercard') etc.
 
   subscription_id → plan name mapping (subscription_id is numeric, NOT '1Week'/'4Week' etc.):
+    DO NOT MODIFY THESE VALUES. COPY EXACTLY.
     CASE
       WHEN subscription_id IN ('2','12','15','18','21','24','27','30') THEN '1Week'
       WHEN subscription_id IN ('3','13','16','19','22','25','28','31') THEN '4Week'
@@ -217,6 +247,9 @@ hopeful-list-429812-f3.analytics_draft.ltv_ml_fast
   Purpose: PRIMARY ML-predicted LTV per user. Join on: customer_account_id.
   Key columns: customer_account_id, ltv (FLOAT64 — total predicted LTV), ltv_recurring (FLOAT64 — predicted recurring only)
   Use ltv_ml_fast as the default LTV source. ltv_ml_approach is not used.
+  ⚠️ NEVER join ltv_ml_fast and all_payments_prod in the same CTE on the same user.
+     A user can have many payment rows — joining both tables together multiplies LTV rows causing wrong AVG/SUM.
+     Always use separate CTEs: one for LTV, one for payments/upsell.
 
   FULL LTV CALCULATION PATTERN (gross by default):
   Total gross LTV = actual ARPPU (first + upsell from payments) + ltv_recurring (predicted future recurring)
@@ -245,9 +278,17 @@ PayPal metrics always use solid_paypal_disputes only — never mix with card cha
   In fraud_final / chargebacks_final: 'adyen uae', 'adyen us (primer)', 'adyen us (solidgate)', 'checkout'
   In all_payments_prod: 'adyen', 'adyen_us', UUIDs for solidgate, 'checkout'
   When showing risk metrics by mid, use the mid column directly from the risk table (fraud_final or chargebacks_final).
-  For total_transactions denominator, group all_payments_prod separately without mid join.
+  For total_transactions denominator, map all_payments_prod MIDs to risk table MID names using this CASE:
+    CASE
+      WHEN mid = 'checkout'                                      THEN 'checkout'
+      WHEN mid = 'adyen'                                         THEN 'adyen uae'
+      WHEN mid = 'adyen_us'                                      THEN 'adyen us (primer)'
+      WHEN mid IN ('d4d7b345-bf19-453a-acdc-8ea68a5d4c44',
+                   '01KMFGBBW8RDNQJV20QPM8MMN')                  THEN 'adyen us (solidgate)'
+      ELSE mid  -- some UUIDs appear in both tables, keep as-is
+    END AS risk_mid
 
-TC15 FRAUD REASON CODES — only these count as fraudulent chargebacks:
+TC15 FRAUD REASON CODES — only these count as fraudulent chargebacks. DO NOT MODIFY. COPY EXACTLY.
   Visa:       reason_code_processed = '10.4'
   Mastercard: reason_code_processed = '4837'
   Amex:       reason_code_processed = 'F29'
@@ -348,12 +389,19 @@ STANDARD RULES — ALWAYS APPLY THESE
 4. DEFAULT DATE RANGE — Last 7 days unless user specifies otherwise.
    Use: AND DATE(TIMESTAMP_ADD(timestamp, INTERVAL 300 MINUTE)) >= CURRENT_DATE() - 7
 
-5. GEO SEGMENTATION — T1 (premium countries) vs WW:
+5. UNION ALL TYPE CONSISTENCY — In UNION ALL queries, never use bare NULL for STRING columns.
+   Use a placeholder string to keep types consistent across all branches:
+   ✅ 'undefined' AS user_id   (when user_id is not available for this event type)
+   ❌ NULL AS user_id          (causes type mismatch errors)
+   For numeric columns, use CAST(NULL AS FLOAT64) or CAST(NULL AS INT64) explicitly.
+
+7. GEO SEGMENTATION — T1 (premium countries) vs WW:
+   DO NOT MODIFY THIS LIST. COPY EXACTLY.
    CASE WHEN country IN ('AE','AT','AU','BH','BN','CA','CZ','DE','DK','ES','FI','FR',
      'GB','HK','IE','IL','IT','JP','KR','NL','NO','PT','QA','SA','SE','SG','SI','US','NZ')
    THEN 'T1' ELSE 'WW' END
 
-6. UTM SOURCE NORMALIZATION — apply whenever using utm_source from event_metadata or funnel join:
+8. UTM SOURCE NORMALIZATION — apply whenever using utm_source from event_metadata or funnel join:
    CASE
      WHEN utm_source IN ('fb_page','fb_bio','fb','fb_post','facebook','insta_bio','insta_page','instagram') THEN 'facebook'
      WHEN utm_source LIKE '%google%' THEN 'google'
@@ -401,6 +449,31 @@ STANDARD RULES — ALWAYS APPLY THESE
     sizes first. Include conversion_rate as a column but don't sort by it — small samples create
     misleading 100% rates. If user explicitly wants minimum sample size, add:
       HAVING COUNT(DISTINCT qa.device_id) >= 50
+
+    AGE LOOKUP FOR USER-LEVEL QUERIES: $.age in event_metadata is populated only AFTER the user
+    answers the age question in the quiz. It is NULL on events before the age question
+    (landing_page_view, early quiz clicks). It IS available on later events (paywall_view, subscribe).
+    For consistent age across ALL funnel rows, use a separate CTE from the quiz click joined on device_id:
+      age_data AS (
+        SELECT device_id, MAX(JSON_VALUE(event_metadata, '$.question_answer')) AS age
+        FROM `hopeful-list-429812-f3.events.funnel-raw-table`
+        WHERE event_name = 'pr_funnel_click'
+          AND JSON_VALUE(event_metadata, '$.key_value') = 'age'
+        GROUP BY 1
+      )
+      -- then: LEFT JOIN age_data ag ON e.device_id = ag.device_id
+      -- Use ag.age for all rows — it fills in age even for early funnel events where $.age is NULL.
+
+    LANGUAGE LOOKUP: $.language is not available on pr_funnel_subscribe.
+    Look it up from pr_funnel_email_submit or pr_funnel_paywall_purchase_click via user_id:
+      language_data AS (
+        SELECT user_id, MAX(JSON_VALUE(event_metadata, '$.language')) AS language
+        FROM `hopeful-list-429812-f3.events.funnel-raw-table`
+        WHERE event_name IN ('pr_funnel_email_submit', 'pr_funnel_paywall_purchase_click')
+          AND user_id IS NOT NULL
+        GROUP BY 1
+      )
+      -- then: LEFT JOIN language_data lang ON e.user_id = lang.user_id
 
 11. GOOGLE ADS COST — cost_micros / 1,000,000 = USD. This is different from payments.amount (÷100).
     ✅ SUM(cost_micros) / 1000000 AS spend_usd
@@ -450,6 +523,7 @@ STANDARD RULES — ALWAYS APPLY THESE
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 EXAMPLES
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+NOTE: Examples illustrate structure and patterns only. Always follow the rules above, even if an example appears to differ.
 
 Q: How many subscriptions per day last 7 days?
 SQL:
@@ -660,6 +734,217 @@ LEFT JOIN tc15 c ON t.month = c.month
 LEFT JOIN resolved r ON t.month = r.month
 ORDER BY t.month DESC
 LIMIT 500
+
+# CHAT MODE ONLY — In dashboard mode this question returns a JSON spec, not raw SQL.
+Q: Show Facebook adset performance for last 30 days: adset name, spend, subscriptions, CAC, avg LTV, ROI, upsell gain per sub, landing page views, start quiz rate, try-to-pays, conversion rate, FB try-to-pays, FB subs, FB CAC, plan breakdown, early cancellation rate
+SQL:
+WITH spend_data AS (
+  SELECT
+    CAST(adset_id AS STRING) AS adset_id,
+    ARRAY_AGG(adset_name ORDER BY date_start DESC LIMIT 1)[OFFSET(0)] AS adset_name,
+    SUM(spend) AS total_spend,
+    SUM(pixel_initiate_checkout) AS fb_ttp,
+    SUM(pixel_purchases) AS fb_subs
+  FROM `hopeful-list-429812-f3.facebook_api.spend_by_age`
+  WHERE date_start >= CURRENT_DATE() - 30
+  GROUP BY adset_id
+),
+funnel_events AS (
+  SELECT
+    JSON_VALUE(event_metadata, '$.utm_adset') AS utm_adset,
+    COUNT(DISTINCT CASE WHEN event_name = 'pr_funnel_landing_page_view' THEN device_id END) AS lp_views,
+    COUNT(DISTINCT CASE WHEN event_name = 'pr_funnel_click' THEN device_id END) AS start_quiz,
+    COUNT(DISTINCT CASE WHEN event_name = 'pr_funnel_paywall_purchase_click' THEN user_id END) AS ttp_count,
+    COUNT(DISTINCT CASE WHEN event_name = 'pr_funnel_subscribe' THEN user_id END) AS subs,
+    COUNT(DISTINCT CASE WHEN event_name = 'pr_funnel_subscribe' AND JSON_VALUE(event_metadata, '$.subscription') = '1Week' THEN user_id END) AS subs_1w,
+    COUNT(DISTINCT CASE WHEN event_name = 'pr_funnel_subscribe' AND JSON_VALUE(event_metadata, '$.subscription') = '4Week' THEN user_id END) AS subs_4w,
+    COUNT(DISTINCT CASE WHEN event_name = 'pr_funnel_subscribe' AND JSON_VALUE(event_metadata, '$.subscription') = '12Week' THEN user_id END) AS subs_12w
+  FROM `hopeful-list-429812-f3.events.funnel-raw-table`
+  WHERE DATE(TIMESTAMP_ADD(timestamp, INTERVAL 300 MINUTE)) >= CURRENT_DATE() - 30
+    AND ip NOT LIKE '173.252%' AND ip NOT LIKE '69.171%' AND ip NOT LIKE '66.220%' AND ip NOT LIKE '31.13%'
+    AND (user_agent NOT LIKE '%AdsBot%' OR user_agent IS NULL)
+    AND (user_agent NOT LIKE '%facebookexternalhit%' OR user_agent IS NULL)
+    AND (user_agent NOT LIKE '%Google-Read-Aloud%' OR user_agent IS NULL)
+  GROUP BY 1
+),
+user_ltv AS (
+  SELECT
+    JSON_VALUE(f.event_metadata, '$.utm_adset') AS utm_adset,
+    AVG(COALESCE(l.ltv, 0)) AS avg_ltv,
+    SUM(COALESCE(l.ltv, 0)) AS total_ltv
+  FROM `hopeful-list-429812-f3.events.funnel-raw-table` f
+  LEFT JOIN `hopeful-list-429812-f3.analytics_draft.ltv_ml_fast` l ON f.user_id = l.customer_account_id
+  WHERE f.event_name = 'pr_funnel_subscribe'
+    AND DATE(TIMESTAMP_ADD(f.timestamp, INTERVAL 300 MINUTE)) >= CURRENT_DATE() - 30
+    AND f.ip NOT LIKE '173.252%' AND f.ip NOT LIKE '69.171%' AND f.ip NOT LIKE '66.220%' AND f.ip NOT LIKE '31.13%'
+    AND (f.user_agent NOT LIKE '%AdsBot%' OR f.user_agent IS NULL)
+    AND (f.user_agent NOT LIKE '%facebookexternalhit%' OR f.user_agent IS NULL)
+  GROUP BY 1
+),
+upsell_data AS (
+  SELECT
+    JSON_VALUE(f.event_metadata, '$.utm_adset') AS utm_adset,
+    SUM(p.amount) / 100 AS total_upsell
+  FROM `hopeful-list-429812-f3.events.funnel-raw-table` f
+  JOIN `hopeful-list-429812-f3.payments.all_payments_prod` p
+    ON f.user_id = p.customer_account_id AND p.payment_type = 'upsell' AND p.status = 'settled'
+  WHERE f.event_name = 'pr_funnel_subscribe'
+    AND DATE(TIMESTAMP_ADD(f.timestamp, INTERVAL 300 MINUTE)) >= CURRENT_DATE() - 30
+    AND f.ip NOT LIKE '173.252%' AND f.ip NOT LIKE '69.171%'
+    AND (f.user_agent NOT LIKE '%AdsBot%' OR f.user_agent IS NULL)
+    AND (f.user_agent NOT LIKE '%facebookexternalhit%' OR f.user_agent IS NULL)
+  GROUP BY 1
+),
+early_churn AS (
+  SELECT
+    JSON_VALUE(f.event_metadata, '$.utm_adset') AS utm_adset,
+    COUNT(DISTINCT CASE WHEN TIMESTAMP_DIFF(a.timestamp, f.timestamp, HOUR) < 12 THEN f.user_id END) AS churn_12h
+  FROM `hopeful-list-429812-f3.events.funnel-raw-table` f
+  JOIN `hopeful-list-429812-f3.events.app-raw-table` a ON f.user_id = a.user_id
+  WHERE f.event_name = 'pr_funnel_subscribe'
+    AND a.event_name = 'pr_webapp_unsubscribed'
+    AND DATE(TIMESTAMP_ADD(f.timestamp, INTERVAL 300 MINUTE)) >= CURRENT_DATE() - 30
+    AND f.ip NOT LIKE '173.252%' AND f.ip NOT LIKE '69.171%'
+    AND (f.user_agent NOT LIKE '%AdsBot%' OR f.user_agent IS NULL)
+    AND (f.user_agent NOT LIKE '%facebookexternalhit%' OR f.user_agent IS NULL)
+  GROUP BY 1
+)
+SELECT
+  s.adset_id,
+  s.adset_name,
+  ROUND(s.total_spend, 2) AS spend,
+  COALESCE(f.subs, 0) AS subscriptions,
+  ROUND(SAFE_DIVIDE(s.total_spend, f.subs), 2) AS cac,
+  ROUND(COALESCE(l.avg_ltv, 0), 2) AS avg_ltv,
+  ROUND(SAFE_DIVIDE(u.total_upsell, f.subs), 2) AS avg_upsell_per_sub,
+  ROUND(SAFE_DIVIDE(l.total_ltv - s.total_spend, s.total_spend) * 100, 2) AS roi_pct,
+  COALESCE(f.lp_views, 0) AS landing_page_views,
+  ROUND(SAFE_DIVIDE(f.start_quiz, f.lp_views) * 100, 2) AS start_quiz_rate,
+  COALESCE(f.ttp_count, 0) AS try_to_pay_count,
+  ROUND(SAFE_DIVIDE(f.subs, f.lp_views) * 100, 4) AS conversion_rate,
+  COALESCE(s.fb_ttp, 0) AS fb_try_to_pays,
+  COALESCE(s.fb_subs, 0) AS fb_subscriptions,
+  ROUND(SAFE_DIVIDE(s.total_spend, s.fb_subs), 2) AS fb_cac,
+  ROUND(SAFE_DIVIDE(s.total_spend, f.lp_views), 4) AS cost_per_lp_view,
+  ROUND(SAFE_DIVIDE(f.subs_1w, f.subs) * 100, 2) AS share_1w_pct,
+  ROUND(SAFE_DIVIDE(f.subs_4w, f.subs) * 100, 2) AS share_4w_pct,
+  ROUND(SAFE_DIVIDE(f.subs_12w, f.subs) * 100, 2) AS share_12w_pct,
+  ROUND(SAFE_DIVIDE(ec.churn_12h, f.subs) * 100, 2) AS early_cancel_rate_pct
+FROM spend_data s
+LEFT JOIN funnel_events f ON s.adset_id = f.utm_adset
+LEFT JOIN user_ltv l ON s.adset_id = l.utm_adset
+LEFT JOIN upsell_data u ON s.adset_id = u.utm_adset
+LEFT JOIN early_churn ec ON s.adset_id = ec.utm_adset
+ORDER BY s.total_spend DESC
+LIMIT 500
+
+Q: Raw funnel data at user/event level for last 14 days — one row per funnel event per user, with quiz_version, utm_source, geo. LTV, upsell, unsub_12h only on subscribe row.
+SQL:
+WITH funnel_events AS (
+  SELECT *
+  FROM `hopeful-list-429812-f3.events.funnel-raw-table`
+  WHERE DATE(TIMESTAMP_ADD(timestamp, INTERVAL 300 MINUTE)) >= CURRENT_DATE() - 14
+    AND event_name IN (
+      'pr_funnel_landing_page_view', 'pr_funnel_click', 'pr_funnel_email_page_view',
+      'pr_funnel_email_submit', 'pr_funnel_selling_page_view',
+      'pr_funnel_paywall_view', 'pr_funnel_paywall_purchase_click', 'pr_funnel_subscribe'
+    )
+    AND ip NOT LIKE '173.252%' AND ip NOT LIKE '69.171%' AND ip NOT LIKE '66.220%' AND ip NOT LIKE '31.13%'
+    AND (user_agent NOT LIKE '%AdsBot%' OR user_agent IS NULL)
+    AND (user_agent NOT LIKE '%facebookexternalhit%' OR user_agent IS NULL)
+    AND (user_agent NOT LIKE '%Google-Read-Aloud%' OR user_agent IS NULL)
+),
+quiz_start AS (
+  SELECT device_id, MIN(timestamp) AS timestamp
+  FROM funnel_events WHERE event_name = 'pr_funnel_click'
+  GROUP BY device_id
+),
+ltv_data AS (
+  SELECT customer_account_id, ltv FROM `hopeful-list-429812-f3.analytics_draft.ltv_ml_fast`
+),
+upsell_data AS (
+  SELECT customer_account_id, ROUND(SUM(amount)/100, 2) AS upsell_revenue
+  FROM `hopeful-list-429812-f3.payments.all_payments_prod`
+  WHERE payment_type = 'upsell' AND status = 'settled'
+  GROUP BY 1
+),
+unsub_12h_data AS (
+  SELECT DISTINCT f.user_id
+  FROM funnel_events f
+  JOIN `hopeful-list-429812-f3.events.app-raw-table` a
+    ON a.user_id = f.user_id AND a.event_name = 'pr_webapp_unsubscribed'
+    AND TIMESTAMP_DIFF(a.timestamp, f.timestamp, HOUR) < 12
+  WHERE f.event_name = 'pr_funnel_subscribe'
+),
+device_only_rows AS (
+  SELECT
+    e.device_id, 'undefined' AS user_id,
+    DATE(TIMESTAMP_ADD(e.timestamp, INTERVAL 300 MINUTE)) AS event_date,
+    e.event_name AS funnel_step,
+    JSON_VALUE(e.event_metadata, '$.quiz_version') AS quiz_version,
+    CASE WHEN JSON_VALUE(e.event_metadata, '$.utm_source') IN ('fb_page','fb_bio','fb','fb_post','facebook','insta_bio','insta_page','instagram') THEN 'facebook'
+         WHEN JSON_VALUE(e.event_metadata, '$.utm_source') LIKE '%google%' THEN 'google'
+         WHEN JSON_VALUE(e.event_metadata, '$.utm_source') IN ('tiktok','TikTok') THEN 'tiktok'
+         ELSE 'other' END AS utm_source,
+    CASE WHEN e.country IN ('AE','AT','AU','BH','BN','CA','CZ','DE','DK','ES','FI','FR','GB','HK','IE','IL','IT','JP','KR','NL','NO','PT','QA','SA','SE','SG','SI','US','NZ') THEN 'T1' ELSE 'WW' END AS geo,
+    CAST(NULL AS FLOAT64) AS ltv, CAST(NULL AS FLOAT64) AS upsell_revenue, CAST(NULL AS INT64) AS unsub_12h
+  FROM funnel_events e
+  WHERE e.event_name IN ('pr_funnel_landing_page_view', 'pr_funnel_email_page_view')
+  UNION ALL
+  SELECT
+    qs.device_id, 'undefined' AS user_id,
+    DATE(TIMESTAMP_ADD(qs.timestamp, INTERVAL 300 MINUTE)) AS event_date,
+    'pr_funnel_click' AS funnel_step,
+    JSON_VALUE(e.event_metadata, '$.quiz_version') AS quiz_version,
+    CASE WHEN JSON_VALUE(e.event_metadata, '$.utm_source') IN ('fb_page','fb_bio','fb','fb_post','facebook','insta_bio','insta_page','instagram') THEN 'facebook'
+         WHEN JSON_VALUE(e.event_metadata, '$.utm_source') LIKE '%google%' THEN 'google'
+         WHEN JSON_VALUE(e.event_metadata, '$.utm_source') IN ('tiktok','TikTok') THEN 'tiktok'
+         ELSE 'other' END AS utm_source,
+    CASE WHEN e.country IN ('AE','AT','AU','BH','BN','CA','CZ','DE','DK','ES','FI','FR','GB','HK','IE','IL','IT','JP','KR','NL','NO','PT','QA','SA','SE','SG','SI','US','NZ') THEN 'T1' ELSE 'WW' END AS geo,
+    CAST(NULL AS FLOAT64), CAST(NULL AS FLOAT64), CAST(NULL AS INT64)
+  FROM quiz_start qs
+  JOIN funnel_events e ON e.device_id = qs.device_id AND e.timestamp = qs.timestamp AND e.event_name = 'pr_funnel_click'
+),
+user_rows AS (
+  SELECT
+    e.device_id, e.user_id,
+    DATE(TIMESTAMP_ADD(e.timestamp, INTERVAL 300 MINUTE)) AS event_date,
+    e.event_name AS funnel_step,
+    JSON_VALUE(e.event_metadata, '$.quiz_version') AS quiz_version,
+    CASE WHEN JSON_VALUE(e.event_metadata, '$.utm_source') IN ('fb_page','fb_bio','fb','fb_post','facebook','insta_bio','insta_page','instagram') THEN 'facebook'
+         WHEN JSON_VALUE(e.event_metadata, '$.utm_source') LIKE '%google%' THEN 'google'
+         WHEN JSON_VALUE(e.event_metadata, '$.utm_source') IN ('tiktok','TikTok') THEN 'tiktok'
+         ELSE 'other' END AS utm_source,
+    CASE WHEN e.country IN ('AE','AT','AU','BH','BN','CA','CZ','DE','DK','ES','FI','FR','GB','HK','IE','IL','IT','JP','KR','NL','NO','PT','QA','SA','SE','SG','SI','US','NZ') THEN 'T1' ELSE 'WW' END AS geo,
+    CAST(NULL AS FLOAT64), CAST(NULL AS FLOAT64), CAST(NULL AS INT64)
+  FROM funnel_events e
+  WHERE e.event_name IN ('pr_funnel_email_submit','pr_funnel_selling_page_view','pr_funnel_paywall_view','pr_funnel_paywall_purchase_click')
+),
+subscribe_rows AS (
+  SELECT
+    e.device_id, e.user_id,
+    DATE(TIMESTAMP_ADD(e.timestamp, INTERVAL 300 MINUTE)) AS event_date,
+    e.event_name AS funnel_step,
+    JSON_VALUE(e.event_metadata, '$.quiz_version') AS quiz_version,
+    CASE WHEN JSON_VALUE(e.event_metadata, '$.utm_source') IN ('fb_page','fb_bio','fb','fb_post','facebook','insta_bio','insta_page','instagram') THEN 'facebook'
+         WHEN JSON_VALUE(e.event_metadata, '$.utm_source') LIKE '%google%' THEN 'google'
+         WHEN JSON_VALUE(e.event_metadata, '$.utm_source') IN ('tiktok','TikTok') THEN 'tiktok'
+         ELSE 'other' END AS utm_source,
+    CASE WHEN e.country IN ('AE','AT','AU','BH','BN','CA','CZ','DE','DK','ES','FI','FR','GB','HK','IE','IL','IT','JP','KR','NL','NO','PT','QA','SA','SE','SG','SI','US','NZ') THEN 'T1' ELSE 'WW' END AS geo,
+    ROUND(l.ltv, 2) AS ltv,
+    COALESCE(u.upsell_revenue, 0) AS upsell_revenue,
+    CASE WHEN un.user_id IS NOT NULL THEN 1 ELSE 0 END AS unsub_12h
+  FROM funnel_events e
+  LEFT JOIN ltv_data l ON e.user_id = l.customer_account_id
+  LEFT JOIN upsell_data u ON e.user_id = u.customer_account_id
+  LEFT JOIN unsub_12h_data un ON e.user_id = un.user_id
+  WHERE e.event_name = 'pr_funnel_subscribe'
+)
+SELECT * FROM device_only_rows
+UNION ALL SELECT * FROM user_rows
+UNION ALL SELECT * FROM subscribe_rows
+ORDER BY device_id, event_date, funnel_step
+LIMIT 5000
 """
 
 _FIX_TEMPLATE = """\
@@ -677,10 +962,13 @@ Please fix the SQL and return only the corrected query, no explanation.\
 
 _DASHBOARD_SUFFIX = """
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-DASHBOARD MODE — OUTPUT FORMAT
+DASHBOARD MODE — OVERRIDES ALL PREVIOUS INSTRUCTIONS
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Return ONLY a JSON object — no explanation, no markdown, no backticks.
-All SQL rules from above apply to every query in the spec.
+⚠️ CRITICAL: You are now in DASHBOARD MODE.
+All instructions above that say "Return ONLY the raw SQL query" are SUSPENDED.
+You MUST return ONLY a valid JSON object — never raw SQL, never explanation, never markdown.
+If you return anything other than a JSON object starting with {, it is WRONG.
+All SQL rules from above still apply to the SQL fields inside the JSON spec.
 
 JSON format:
 {
@@ -734,6 +1022,17 @@ SQL rules specific to dashboard mode:
 
 5. Generate 3-6 charts total. Each SQL must be self-contained and independently runnable.
    Add LIMIT 1000 to all SQL queries.
+
+6. MULTI-SERIES LINE CHARTS: when showing a metric over time broken down by a dimension (e.g. VAMP by MID,
+   spend by campaign), PIVOT to wide format — one column per dimension value, NOT one row per dimension.
+   ✅ Pivot pattern:
+     SELECT month,
+       MAX(CASE WHEN risk_mid = 'checkout' THEN vamp_rate END) AS checkout,
+       MAX(CASE WHEN risk_mid = 'adyen uae' THEN vamp_rate END) AS adyen_uae,
+       ...
+     FROM rates GROUP BY month ORDER BY month
+   Then set y: ["checkout", "adyen_uae", ...] — each becomes a separate line.
+   ❌ NEVER return long format (month, mid, value) for a line chart — all points merge into one line.
 """
 
 
@@ -775,4 +1074,13 @@ class ClaudeClient:
     def generate_dashboard_spec(self, description: str) -> dict:
         import json
         raw = self._call(description, system=self.dashboard_prompt)
-        return json.loads(raw)
+        # Try direct parse first
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            pass
+        # AI returned extra text — extract the first {...} block
+        match = re.search(r'\{.*\}', raw, re.DOTALL)
+        if match:
+            return json.loads(match.group())
+        raise ValueError(f"No JSON found in response: {raw[:300]}")
