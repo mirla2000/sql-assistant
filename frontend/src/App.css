@@ -258,6 +258,25 @@ body {
   background: color-mix(in srgb, var(--bg) 60%, var(--surface));
 }
 
+.sql-expand-header {
+  display: flex;
+  justify-content: flex-end;
+  padding: 6px 14px 0;
+}
+
+.copy-sql-btn {
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  color: var(--text-muted);
+  font-size: 11px;
+  padding: 3px 10px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.copy-sql-btn:hover { border-color: var(--accent); color: var(--accent); }
+.copy-sql-btn.copied { border-color: var(--success); color: var(--success); }
+
 .sql-code {
   padding: 16px 20px;
   font-family: var(--font-mono);

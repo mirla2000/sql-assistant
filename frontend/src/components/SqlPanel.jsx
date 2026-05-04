@@ -1,7 +1,15 @@
-import { useState } from 'react'
+import { useState, useCallback } from 'react'
 
 export default function SqlPanel({ sql }) {
   const [open, setOpen] = useState(false)
+  const [copied, setCopied] = useState(false)
+
+  const copy = useCallback(() => {
+    navigator.clipboard.writeText(sql).then(() => {
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1500)
+    })
+  }, [sql])
 
   if (!sql) return null
 
@@ -11,7 +19,16 @@ export default function SqlPanel({ sql }) {
         <span className="sql-label">Generated SQL</span>
         <span className="sql-toggle">{open ? '▲ Hide' : '▼ Show'}</span>
       </div>
-      {open && <pre className="sql-code">{sql}</pre>}
+      {open && (
+        <>
+          <div className="sql-expand-header">
+            <button className={`copy-sql-btn${copied ? ' copied' : ''}`} onClick={e => { e.stopPropagation(); copy() }}>
+              {copied ? '✓ Copied' : 'Copy'}
+            </button>
+          </div>
+          <pre className="sql-code">{sql}</pre>
+        </>
+      )}
     </div>
   )
 }

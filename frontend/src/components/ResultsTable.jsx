@@ -1,4 +1,15 @@
-import { useState } from 'react'
+import { useState, useCallback } from 'react'
+
+function useCopyButton() {
+  const [copied, setCopied] = useState(false)
+  const copy = useCallback((text) => {
+    navigator.clipboard.writeText(text).then(() => {
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1500)
+    })
+  }, [])
+  return [copied, copy]
+}
 
 function formatSql(sql) {
   if (!sql) return ''
@@ -32,6 +43,7 @@ export default function ResultsTable({ sql, columns, rows, rowCount }) {
   const [sqlOpen, setSqlOpen] = useState(false)
   const [page, setPage] = useState(1)
   const [pageSize, setPageSize] = useState(10)
+  const [copied, copy] = useCopyButton()
 
   function downloadCsv() {
     const header = columns.join(',')
@@ -87,6 +99,11 @@ export default function ResultsTable({ sql, columns, rows, rowCount }) {
 
       {sqlOpen && sql && (
         <div className="sql-expand">
+          <div className="sql-expand-header">
+            <button className={`copy-sql-btn${copied ? ' copied' : ''}`} onClick={() => copy(sql)}>
+              {copied ? '✓ Copied' : 'Copy'}
+            </button>
+          </div>
           <pre className="sql-code">{formatSql(sql)}</pre>
         </div>
       )}
